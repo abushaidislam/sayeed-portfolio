@@ -1,0 +1,742 @@
+---
+title: 'Advanced API Design: GraphQL, REST Best Practices, and API Security'
+abstract: 'Comprehensive guide to modern API design patterns, GraphQL implementation, RESTful best practices, and enterprise-level API security strategies.'
+date: '2024-02-05'
+banner: /articles/advanced-api-design/banner.jpg
+featured: false
+---
+
+## Introduction
+
+Modern applications rely heavily on well-designed APIs for communication between services, mobile apps, and third-party integrations. This article covers advanced API design patterns, implementation strategies, and security considerations.
+
+## GraphQL Implementation
+
+```javascript
+// GraphQL Schema Definition
+const { gql } = require('apollo-server-express');
+
+const typeDefs = gql`
+  type User {
+    id: ID!
+    email: String!
+    name: String!
+    posts: [Post!]!
+    profile: UserProfile
+  }
+
+  type Post {
+    id: ID!
+    title: String!
+    content: String!
+    author: User!
+    tags: [String!]!
+    createdAt: String!
+    comments: [Comment!]!
+  }
+
+  type Comment {
+    id: ID!
+    content: String!
+    author: User!
+    post: Post!
+    createdAt: String!
+  }
+
+  type UserProfile {
+    bio: String
+    avatar: String
+    socialLinks: [SocialLink!]!
+  }
+
+  type SocialLink {
+    platform: String!
+    url: String!
+  }
+
+  input CreatePostInput {
+    title: String!
+    content: String!
+    tags: [String!]!
+  }
+
+  input UpdatePostInput {
+    title: String
+    content: String
+    tags: [String!]
+  }
+
+  type Query {
+    users(limit: Int, offset: Int): [User!]!
+    user(id: ID!): User
+    posts(filter: PostFilter, sort: PostSort): [Post!]!
+    post(id: ID!): Post
+    searchPosts(query: String!): [Post!]!
+  }
+
+  type Mutation {
+    createPost(input: CreatePostInput!): Post!
+    updatePost(id: ID!, input: UpdatePostInput!): Post!
+    deletePost(id: ID!): Boolean!
+    addComment(postId: ID!, content: String!): Comment!
+  }
+
+  type Subscription {
+    postAdded: Post!
+    commentAdded(postId: ID!): Comment!
+  }
+
+  input PostFilter {
+    authorId: ID
+    tags: [String!]
+    dateRange: DateRangeInput
+  }
+
+  input DateRangeInput {
+    start: String!
+    end: String!
+  }
+
+  enum PostSort {
+    CREATED_AT_ASC
+    CREATED_AT_DESC
+    TITLE_ASC
+    TITLE_DESC
+  }
+`;
+
+// GraphQL Resolvers with DataLoader for N+1 prevention
+const DataLoader = require('dataloader');
+
+class PostService {
+  constructor(database) {
+    this.db = database;
+    this.setupDataLoaders();
+  }
+
+  setupDataLoaders() {
+    this.userLoader = new DataLoader(async (userIds) => {
+      const users = await this.db.users.findByIds(userIds);
+      return userIds.map(id => users.find(user => user.id === id));
+    });
+
+    this.postsByUserLoader = new DataLoader(async (userIds) => {
+      const posts = await this.db.posts.findByUserIds(userIds);
+      return userIds.map(userId => 
+        posts.filter(post => post.authorId === userId)
+      );
+    });
+
+    this.commentsByPostLoader = new DataLoader(async (postIds) => {
+      const comments = await this.db.comments.findByPostIds(postIds);
+      return postIds.map(postId =>
+        comments.filter(comment => comment.postId === postId)
+      );
+    });
+  }
+}
+
+const resolvers = {
+  Query: {
+    users: async (_, { limit = 20, offset = 0 }, { dataSources }) => {
+      return await dataSources.userAPI.getUsers({ limit, offset });
+    },
+
+    user: async (_, { id }, { dataSources }) => {
+      return await dataSources.userAPI.getUserById(id);
+    },
+
+    posts: async (_, { filter, sort }, { dataSources }) => {
+      return await dataSources.postAPI.getPosts({ filter, sort });
+    },
+
+    searchPosts: async (_, { query }, { dataSources }) => {
+      return await dataSources.searchAPI.searchPosts(query);
+    }
+  },
+
+  Mutation: {
+    createPost: async (_, { input }, { dataSources, user }) => {
+      if (!user) throw new AuthenticationError('Must be authenticated');
+      
+      return await dataSources.postAPI.createPost({
+        ...input,
+        authorId: user.id
+      });
+    },
+
+    updatePost: async (_, { id, input }, { dataSources, user }) => {
+      const post = await dataSources.postAPI.getPostById(id);
+      
+      if (post.authorId !== user.id) {
+        throw new ForbiddenError('Can only update own posts');
+      }
+      
+      return await dataSources.postAPI.updatePost(id, input);
+    }
+  },
+
+  User: {
+    posts: async (user, _, { postService }) => {
+      return await postService.postsByUserLoader.load(user.id);
+    },
+
+    profile: async (user, _, { dataSources }) => {
+      return await dataSources.profileAPI.getProfile(user.id);
+    }
+  },
+
+  Post: {
+    author: async (post, _, { postService }) => {
+      return await postService.userLoader.load(post.authorId);
+    },
+
+    comments: async (post, _, { postService }) => {
+      return await postService.commentsByPostLoader.load(post.id);
+    }
+  },
+
+  Subscription: {
+    postAdded: {
+      subscribe: (_, __, { pubsub }) => pubsub.asyncIterator('POST_ADDED')
+    },
+
+    commentAdded: {
+      subscribe: (_, { postId }, { pubsub }) => 
+        pubsub.asyncIterator(`COMMENT_ADDED_${postId}`)
+    }
+  }
+};
+```
+
+## RESTful API Best Practices
+
+```javascript
+// Express.js API with advanced patterns
+class PostController {
+  constructor(postService, cacheService) {
+    this.postService = postService;
+    this.cache = cacheService;
+  }
+
+  // GET /api/posts?page=1&limit=20&sort=createdAt:desc&filter[status]=published
+  async getPosts(req, res) {
+    try {
+      const options = this.parseQueryParams(req.query);
+      const cacheKey = `posts:${JSON.stringify(options)}`;
+      
+      // Try cache first
+      let result = await this.cache.get(cacheKey);
+      
+      if (!result) {
+        result = await this.postService.findPosts(options);
+        await this.cache.set(cacheKey, result, 300); // 5 minutes
+      }
+
+      // HATEOAS links
+      const links = this.generateLinks(req, result);
+
+      res.json({
+        data: result.posts,
+        meta: {
+          total: result.total,
+          page: options.page,
+          limit: options.limit,
+          totalPages: Math.ceil(result.total / options.limit)
+        },
+        links
+      });
+    } catch (error) {
+      this.handleError(error, res);
+    }
+  }
+
+  // POST /api/posts
+  async createPost(req, res) {
+    try {
+      const validation = await this.validatePostData(req.body);
+      if (!validation.isValid) {
+        return res.status(400).json({
+          error: 'Validation failed',
+          details: validation.errors
+        });
+      }
+
+      const post = await this.postService.createPost({
+        ...req.body,
+        authorId: req.user.id
+      });
+
+      // Invalidate related caches
+      await this.cache.invalidatePattern('posts:*');
+      
+      // Send 201 Created with Location header
+      res.status(201)
+         .location(`/api/posts/${post.id}`)
+         .json({ data: post });
+
+    } catch (error) {
+      this.handleError(error, res);
+    }
+  }
+
+  // PATCH /api/posts/:id
+  async updatePost(req, res) {
+    try {
+      const { id } = req.params;
+      const post = await this.postService.findById(id);
+      
+      if (!post) {
+        return res.status(404).json({
+          error: 'Post not found'
+        });
+      }
+
+      // Authorization check
+      if (post.authorId !== req.user.id && !req.user.isAdmin) {
+        return res.status(403).json({
+          error: 'Insufficient permissions'
+        });
+      }
+
+      const updatedPost = await this.postService.updatePost(id, req.body);
+      
+      // Invalidate caches
+      await Promise.all([
+        this.cache.delete(`post:${id}`),
+        this.cache.invalidatePattern('posts:*')
+      ]);
+
+      res.json({ data: updatedPost });
+    } catch (error) {
+      this.handleError(error, res);
+    }
+  }
+
+  parseQueryParams(query) {
+    const {
+      page = 1,
+      limit = 20,
+      sort = 'createdAt:desc',
+      filter = {}
+    } = query;
+
+    // Parse sort parameter
+    const [sortField, sortOrder = 'asc'] = sort.split(':');
+
+    // Parse filter parameters
+    const parsedFilters = {};
+    Object.keys(filter).forEach(key => {
+      if (key.startsWith('filter[') && key.endsWith(']')) {
+        const filterKey = key.slice(7, -1);
+        parsedFilters[filterKey] = filter[key];
+      }
+    });
+
+    return {
+      page: parseInt(page),
+      limit: Math.min(parseInt(limit), 100), // Max 100 items
+      sort: { field: sortField, order: sortOrder },
+      filters: parsedFilters
+    };
+  }
+
+  generateLinks(req, result) {
+    const baseUrl = `${req.protocol}://${req.get('host')}${req.baseUrl}`;
+    const { page, limit } = result.pagination;
+    
+    const links = {
+      self: `${baseUrl}${req.path}${req.url.split('?')[1] ? '?' + req.url.split('?')[1] : ''}`
+    };
+
+    if (page > 1) {
+      links.prev = `${baseUrl}${req.path}?page=${page - 1}&limit=${limit}`;
+      links.first = `${baseUrl}${req.path}?page=1&limit=${limit}`;
+    }
+
+    if (page < result.totalPages) {
+      links.next = `${baseUrl}${req.path}?page=${page + 1}&limit=${limit}`;
+      links.last = `${baseUrl}${req.path}?page=${result.totalPages}&limit=${limit}`;
+    }
+
+    return links;
+  }
+}
+```
+
+## API Security Implementation
+
+```javascript
+// JWT Authentication with refresh tokens
+class AuthService {
+  constructor(userService, tokenService) {
+    this.userService = userService;
+    this.tokenService = tokenService;
+  }
+
+  async authenticate(email, password) {
+    const user = await this.userService.findByEmail(email);
+    
+    if (!user || !await this.verifyPassword(password, user.hashedPassword)) {
+      throw new AuthenticationError('Invalid credentials');
+    }
+
+    // Generate tokens
+    const accessToken = this.tokenService.generateAccessToken({
+      userId: user.id,
+      email: user.email,
+      roles: user.roles
+    });
+
+    const refreshToken = this.tokenService.generateRefreshToken({
+      userId: user.id
+    });
+
+    // Store refresh token
+    await this.tokenService.storeRefreshToken(user.id, refreshToken);
+
+    return {
+      accessToken,
+      refreshToken,
+      user: this.sanitizeUser(user)
+    };
+  }
+
+  async refreshAccessToken(refreshToken) {
+    const payload = this.tokenService.verifyRefreshToken(refreshToken);
+    
+    if (!payload) {
+      throw new AuthenticationError('Invalid refresh token');
+    }
+
+    const user = await this.userService.findById(payload.userId);
+    
+    if (!user) {
+      throw new AuthenticationError('User not found');
+    }
+
+    // Generate new access token
+    const accessToken = this.tokenService.generateAccessToken({
+      userId: user.id,
+      email: user.email,
+      roles: user.roles
+    });
+
+    return { accessToken };
+  }
+}
+
+// Rate limiting middleware
+class RateLimiter {
+  constructor(redisClient) {
+    this.redis = redisClient;
+  }
+
+  create(options) {
+    return async (req, res, next) => {
+      const key = this.generateKey(req, options);
+      const limit = this.getLimit(req, options);
+      const windowMs = options.windowMs || 60000;
+
+      try {
+        const current = await this.increment(key, windowMs);
+        
+        // Set headers
+        res.set({
+          'X-RateLimit-Limit': limit,
+          'X-RateLimit-Remaining': Math.max(0, limit - current),
+          'X-RateLimit-Reset': new Date(Date.now() + windowMs)
+        });
+
+        if (current > limit) {
+          return res.status(429).json({
+            error: 'Too many requests',
+            retryAfter: Math.ceil(windowMs / 1000)
+          });
+        }
+
+        next();
+      } catch (error) {
+        console.error('Rate limiting error:', error);
+        next(); // Fail open
+      }
+    };
+  }
+
+  async increment(key, windowMs) {
+    const pipeline = this.redis.pipeline();
+    pipeline.incr(key);
+    pipeline.expire(key, Math.ceil(windowMs / 1000));
+    
+    const results = await pipeline.exec();
+    return results[0][1];
+  }
+
+  generateKey(req, options) {
+    const identifier = options.keyGenerator 
+      ? options.keyGenerator(req)
+      : req.ip;
+    
+    return `rate_limit:${identifier}:${options.endpoint || req.route.path}`;
+  }
+
+  getLimit(req, options) {
+    if (typeof options.max === 'function') {
+      return options.max(req);
+    }
+    return options.max || 100;
+  }
+}
+
+// API Security middleware
+const securityMiddleware = {
+  // CORS configuration
+  cors: (req, res, next) => {
+    const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || [];
+    const origin = req.headers.origin;
+
+    if (allowedOrigins.includes(origin)) {
+      res.header('Access-Control-Allow-Origin', origin);
+    }
+
+    res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,PATCH,OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.header('Access-Control-Max-Age', '86400');
+
+    if (req.method === 'OPTIONS') {
+      res.sendStatus(204);
+    } else {
+      next();
+    }
+  },
+
+  // Security headers
+  securityHeaders: (req, res, next) => {
+    res.set({
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
+      'X-XSS-Protection': '1; mode=block',
+      'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+      'Content-Security-Policy': "default-src 'self'",
+      'Referrer-Policy': 'strict-origin-when-cross-origin'
+    });
+    next();
+  },
+
+  // Input validation and sanitization
+  validateInput: (schema) => {
+    return (req, res, next) => {
+      const { error, value } = schema.validate(req.body, {
+        abortEarly: false,
+        stripUnknown: true
+      });
+
+      if (error) {
+        return res.status(400).json({
+          error: 'Validation failed',
+          details: error.details.map(detail => ({
+            field: detail.path.join('.'),
+            message: detail.message
+          }))
+        });
+      }
+
+      req.body = value;
+      next();
+    };
+  }
+};
+```
+
+## API Documentation with OpenAPI
+
+```yaml
+openapi: 3.0.3
+info:
+  title: Advanced Blog API
+  description: Comprehensive API for blog management with advanced features
+  version: 2.0.0
+  contact:
+    name: API Support
+    email: api-support@company.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: https://api.example.com/v2
+    description: Production server
+  - url: https://staging-api.example.com/v2
+    description: Staging server
+
+security:
+  - BearerAuth: []
+
+paths:
+  /posts:
+    get:
+      summary: Get posts with filtering and pagination
+      tags: [Posts]
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [createdAt:asc, createdAt:desc, title:asc, title:desc]
+            default: createdAt:desc
+        - name: filter[status]
+          in: query
+          schema:
+            type: string
+            enum: [draft, published, archived]
+        - name: filter[author]
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Post'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+                  links:
+                    $ref: '#/components/schemas/PaginationLinks'
+
+    post:
+      summary: Create a new post
+      tags: [Posts]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePostRequest'
+      responses:
+        '201':
+          description: Post created successfully
+          headers:
+            Location:
+              schema:
+                type: string
+              description: URL of the created post
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Post'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    Post:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        content:
+          type: string
+        status:
+          type: string
+          enum: [draft, published, archived]
+        author:
+          $ref: '#/components/schemas/User'
+        tags:
+          type: array
+          items:
+            type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreatePostRequest:
+      type: object
+      required: [title, content]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        content:
+          type: string
+          minLength: 1
+        tags:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+          enum: [draft, published]
+          default: draft
+
+    PaginationMeta:
+      type: object
+      properties:
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+        totalPages:
+          type: integer
+
+    PaginationLinks:
+      type: object
+      properties:
+        self:
+          type: string
+        first:
+          type: string
+        prev:
+          type: string
+        next:
+          type: string
+        last:
+          type: string
+```
+
+## Conclusion
+
+Modern API design requires careful consideration of:
+
+- **GraphQL vs REST**: Choose based on client needs and complexity
+- **Security**: Implement authentication, authorization, and rate limiting
+- **Performance**: Use caching, pagination, and efficient data fetching
+- **Documentation**: Provide comprehensive, up-to-date API documentation
+- **Monitoring**: Track usage, performance, and errors
+
+Well-designed APIs form the backbone of modern applications and enable seamless integration between services and clients.

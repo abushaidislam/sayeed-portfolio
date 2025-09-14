@@ -1,0 +1,580 @@
+---
+title: 'Machine Learning in Production: MLOps and Model Deployment'
+abstract: 'Complete guide to deploying machine learning models in production environments with MLOps practices, model monitoring, and automated pipelines.'
+date: '2024-02-10'
+banner: /articles/mlops-production/banner.jpg
+featured: false
+---
+
+## Introduction
+
+Deploying machine learning models to production requires more than just training algorithms. This article covers MLOps practices, deployment strategies, and monitoring systems for production ML applications.
+
+## Model Training Pipeline
+
+```python
+# MLflow experiment tracking
+import mlflow
+import mlflow.sklearn
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, precision_score, recall_score
+
+class ModelTrainer:
+    def __init__(self, experiment_name="customer-churn"):
+        mlflow.set_experiment(experiment_name)
+        self.model = None
+        self.features = None
+        
+    def train_model(self, data, hyperparameters):
+        with mlflow.start_run():
+            # Log hyperparameters
+            mlflow.log_params(hyperparameters)
+            
+            # Prepare data
+            X = data.drop('target', axis=1)
+            y = data['target']
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42
+            )
+            
+            # Train model
+            self.model = RandomForestClassifier(**hyperparameters)
+            self.model.fit(X_train, y_train)
+            
+            # Evaluate model
+            predictions = self.model.predict(X_test)
+            accuracy = accuracy_score(y_test, predictions)
+            precision = precision_score(y_test, predictions)
+            recall = recall_score(y_test, predictions)
+            
+            # Log metrics
+            mlflow.log_metrics({
+                'accuracy': accuracy,
+                'precision': precision,
+                'recall': recall
+            })
+            
+            # Log model
+            mlflow.sklearn.log_model(
+                self.model, 
+                "model",
+                registered_model_name="churn-predictor"
+            )
+            
+            # Log feature importance
+            feature_importance = dict(zip(X.columns, self.model.feature_importances_))
+            mlflow.log_dict(feature_importance, "feature_importance.json")
+            
+            return {
+                'accuracy': accuracy,
+                'precision': precision,
+                'recall': recall,
+                'run_id': mlflow.active_run().info.run_id
+            }
+
+# Model validation and testing
+class ModelValidator:
+    def __init__(self, model, validation_data):
+        self.model = model
+        self.validation_data = validation_data
+        
+    def validate_model_performance(self, threshold_metrics):
+        """Validate model meets performance thresholds"""
+        X_val = self.validation_data.drop('target', axis=1)
+        y_val = self.validation_data['target']
+        
+        predictions = self.model.predict(X_val)
+        
+        metrics = {
+            'accuracy': accuracy_score(y_val, predictions),
+            'precision': precision_score(y_val, predictions),
+            'recall': recall_score(y_val, predictions)
+        }
+        
+        validation_results = {}
+        for metric, value in metrics.items():
+            threshold = threshold_metrics.get(metric, 0)
+            validation_results[metric] = {
+                'value': value,
+                'threshold': threshold,
+                'passed': value >= threshold
+            }
+        
+        return validation_results
+    
+    def test_data_drift(self, reference_data):
+        """Detect data drift using statistical tests"""
+        from scipy.stats import ks_2samp
+        
+        drift_results = {}
+        current_features = self.validation_data.drop('target', axis=1)
+        reference_features = reference_data.drop('target', axis=1)
+        
+        for column in current_features.columns:
+            statistic, p_value = ks_2samp(
+                reference_features[column], 
+                current_features[column]
+            )
+            
+            drift_results[column] = {
+                'p_value': p_value,
+                'drift_detected': p_value < 0.05  # 5% significance level
+            }
+        
+        return drift_results
+```
+
+## Model Deployment with FastAPI
+
+```python
+# Production model serving API
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from pydantic import BaseModel
+import joblib
+import numpy as np
+from typing import List, Dict
+import redis
+import json
+import logging
+from datetime import datetime
+
+app = FastAPI(title="ML Model API", version="1.0.0")
+
+# Redis for caching and monitoring
+redis_client = redis.Redis(host='localhost', port=6379, db=0)
+
+class PredictionRequest(BaseModel):
+    features: Dict[str, float]
+    model_version: str = "latest"
+
+class PredictionResponse(BaseModel):
+    prediction: float
+    probability: List[float]
+    model_version: str
+    prediction_id: str
+
+class ModelManager:
+    def __init__(self):
+        self.models = {}
+        self.load_models()
+    
+    def load_models(self):
+        """Load all available model versions"""
+        import mlflow.sklearn
+        
+        # Load latest production model
+        model_uri = "models:/churn-predictor/Production"
+        self.models["latest"] = mlflow.sklearn.load_model(model_uri)
+        
+        # Load specific versions if needed
+        # self.models["v1.2"] = mlflow.sklearn.load_model("models:/churn-predictor/1")
+    
+    def get_model(self, version="latest"):
+        if version not in self.models:
+            raise ValueError(f"Model version {version} not found")
+        return self.models[version]
+
+model_manager = ModelManager()
+
+@app.post("/predict", response_model=PredictionResponse)
+async def predict(request: PredictionRequest, background_tasks: BackgroundTasks):
+    try:
+        # Get model
+        model = model_manager.get_model(request.model_version)
+        
+        # Prepare features
+        feature_array = np.array([list(request.features.values())]).reshape(1, -1)
+        
+        # Make prediction
+        prediction = model.predict(feature_array)[0]
+        probabilities = model.predict_proba(feature_array)[0].tolist()
+        
+        # Generate prediction ID
+        prediction_id = f"pred_{datetime.now().isoformat()}_{hash(str(request.features))}"
+        
+        # Log prediction for monitoring (async)
+        background_tasks.add_task(
+            log_prediction,
+            prediction_id,
+            request.features,
+            prediction,
+            probabilities
+        )
+        
+        return PredictionResponse(
+            prediction=float(prediction),
+            probability=probabilities,
+            model_version=request.model_version,
+            prediction_id=prediction_id
+        )
+        
+    except Exception as e:
+        logging.error(f"Prediction error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Prediction failed")
+
+async def log_prediction(prediction_id, features, prediction, probabilities):
+    """Log prediction for monitoring and drift detection"""
+    log_data = {
+        'prediction_id': prediction_id,
+        'timestamp': datetime.now().isoformat(),
+        'features': features,
+        'prediction': prediction,
+        'probabilities': probabilities
+    }
+    
+    # Store in Redis for real-time monitoring
+    redis_client.setex(
+        f"prediction:{prediction_id}",
+        86400,  # 24 hours TTL
+        json.dumps(log_data)
+    )
+    
+    # Add to monitoring queue
+    redis_client.lpush("prediction_queue", json.dumps(log_data))
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for load balancer"""
+    try:
+        # Check model availability
+        model = model_manager.get_model("latest")
+        
+        # Check Redis connection
+        redis_client.ping()
+        
+        return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Service unhealthy: {str(e)}")
+
+@app.get("/metrics")
+async def get_metrics():
+    """Endpoint for monitoring metrics"""
+    try:
+        # Get recent predictions from Redis
+        recent_predictions = redis_client.lrange("prediction_queue", 0, 99)
+        
+        if not recent_predictions:
+            return {"message": "No recent predictions"}
+        
+        # Calculate metrics
+        predictions_data = [json.loads(pred) for pred in recent_predictions]
+        
+        avg_confidence = np.mean([
+            max(pred['probabilities']) for pred in predictions_data
+        ])
+        
+        prediction_distribution = {}
+        for pred in predictions_data:
+            prediction_value = pred['prediction']
+            prediction_distribution[prediction_value] = \
+                prediction_distribution.get(prediction_value, 0) + 1
+        
+        return {
+            "total_predictions": len(predictions_data),
+            "average_confidence": float(avg_confidence),
+            "prediction_distribution": prediction_distribution,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Metrics unavailable: {str(e)}")
+```
+
+## Docker Deployment Configuration
+
+```dockerfile
+# Multi-stage Dockerfile for ML model
+FROM python:3.9-slim as builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
+
+# Production stage
+FROM python:3.9-slim
+
+# Create non-root user
+RUN groupadd -r mluser && useradd -r -g mluser mluser
+
+# Copy installed packages from builder
+COPY --from=builder /root/.local /home/mluser/.local
+
+# Set up application directory
+WORKDIR /app
+COPY --chown=mluser:mluser . .
+
+# Make sure scripts are executable
+RUN chmod +x /app/scripts/*.sh
+
+# Switch to non-root user
+USER mluser
+
+# Add local bin to PATH
+ENV PATH=/home/mluser/.local/bin:$PATH
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Expose port
+EXPOSE 8000
+
+# Start application
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+```yaml
+# Kubernetes deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-model-api
+  labels:
+    app: ml-model-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ml-model-api
+  template:
+    metadata:
+      labels:
+        app: ml-model-api
+    spec:
+      containers:
+      - name: ml-api
+        image: ml-model-api:v1.0.0
+        ports:
+        - containerPort: 8000
+        env:
+        - name: MLFLOW_TRACKING_URI
+          value: "http://mlflow-server:5000"
+        - name: REDIS_HOST
+          value: "redis-service"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 15
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-model-service
+spec:
+  selector:
+    app: ml-model-api
+  ports:
+  - port: 80
+    targetPort: 8000
+  type: LoadBalancer
+```
+
+## Model Monitoring System
+
+```python
+# Model monitoring and alerting
+import pandas as pd
+from datetime import datetime, timedelta
+import smtplib
+from email.mime.text import MIMEText
+
+class ModelMonitor:
+    def __init__(self, model_manager, alert_config):
+        self.model_manager = model_manager
+        self.alert_config = alert_config
+        self.performance_history = []
+        
+    def monitor_model_performance(self):
+        """Monitor model performance and detect issues"""
+        # Get recent predictions
+        recent_predictions = self.get_recent_predictions()
+        
+        if len(recent_predictions) < 100:  # Need minimum samples
+            return
+        
+        # Calculate performance metrics
+        metrics = self.calculate_performance_metrics(recent_predictions)
+        
+        # Check for performance degradation
+        alerts = []
+        
+        if metrics['avg_confidence'] < self.alert_config['min_confidence']:
+            alerts.append(f"Low confidence detected: {metrics['avg_confidence']:.3f}")
+        
+        if metrics['prediction_rate'] < self.alert_config['min_prediction_rate']:
+            alerts.append(f"Low prediction rate: {metrics['prediction_rate']:.2f}/hour")
+        
+        # Data drift detection
+        drift_score = self.detect_data_drift(recent_predictions)
+        if drift_score > self.alert_config['max_drift_score']:
+            alerts.append(f"Data drift detected: score {drift_score:.3f}")
+        
+        # Send alerts if any issues found
+        if alerts:
+            self.send_alerts(alerts)
+        
+        # Store performance history
+        self.performance_history.append({
+            'timestamp': datetime.now(),
+            'metrics': metrics,
+            'alerts': alerts
+        })
+    
+    def get_recent_predictions(self, hours=24):
+        """Get predictions from the last N hours"""
+        cutoff_time = datetime.now() - timedelta(hours=hours)
+        
+        # In production, this would query your prediction log storage
+        predictions = []
+        for key in redis_client.scan_iter(match="prediction:*"):
+            pred_data = json.loads(redis_client.get(key))
+            pred_time = datetime.fromisoformat(pred_data['timestamp'])
+            
+            if pred_time > cutoff_time:
+                predictions.append(pred_data)
+        
+        return predictions
+    
+    def calculate_performance_metrics(self, predictions):
+        """Calculate key performance metrics"""
+        if not predictions:
+            return {}
+        
+        confidences = [max(pred['probabilities']) for pred in predictions]
+        
+        return {
+            'total_predictions': len(predictions),
+            'avg_confidence': np.mean(confidences),
+            'min_confidence': np.min(confidences),
+            'prediction_rate': len(predictions) / 24,  # per hour
+            'timestamp': datetime.now().isoformat()
+        }
+    
+    def detect_data_drift(self, recent_predictions):
+        """Simple data drift detection using feature statistics"""
+        if len(recent_predictions) < 50:
+            return 0
+        
+        # Get feature statistics from recent predictions
+        recent_features = [pred['features'] for pred in recent_predictions]
+        recent_df = pd.DataFrame(recent_features)
+        
+        # Compare with training data statistics (stored during training)
+        training_stats = self.load_training_statistics()
+        
+        drift_scores = []
+        for column in recent_df.columns:
+            if column in training_stats:
+                recent_mean = recent_df[column].mean()
+                recent_std = recent_df[column].std()
+                
+                training_mean = training_stats[column]['mean']
+                training_std = training_stats[column]['std']
+                
+                # Calculate normalized difference
+                mean_diff = abs(recent_mean - training_mean) / training_std
+                std_diff = abs(recent_std - training_std) / training_std
+                
+                drift_scores.append(mean_diff + std_diff)
+        
+        return np.mean(drift_scores) if drift_scores else 0
+    
+    def send_alerts(self, alerts):
+        """Send alert notifications"""
+        message = f"""
+        Model Performance Alert - {datetime.now()}
+        
+        The following issues were detected:
+        {''.join([f'- {alert}' for alert in alerts])}
+        
+        Please investigate immediately.
+        """
+        
+        # Email alert
+        msg = MIMEText(message)
+        msg['Subject'] = 'ML Model Performance Alert'
+        msg['From'] = self.alert_config['from_email']
+        msg['To'] = self.alert_config['to_email']
+        
+        try:
+            with smtplib.SMTP(self.alert_config['smtp_server']) as server:
+                server.send_message(msg)
+        except Exception as e:
+            logging.error(f"Failed to send alert email: {e}")
+        
+        # Slack/Teams notification could be added here
+        logging.warning(f"Model alerts: {alerts}")
+
+# Automated retraining pipeline  
+class AutoRetrainer:
+    def __init__(self, model_trainer, model_validator):
+        self.trainer = model_trainer
+        self.validator = model_validator
+        
+    def should_retrain(self, performance_metrics, drift_score):
+        """Determine if model should be retrained"""
+        return (
+            performance_metrics.get('avg_confidence', 1.0) < 0.7 or
+            drift_score > 0.3 or
+            len(performance_metrics.get('recent_data', [])) > 10000
+        )
+    
+    async def trigger_retraining(self, new_data):
+        """Trigger automated model retraining"""
+        logging.info("Starting automated model retraining...")
+        
+        # Train new model
+        training_results = self.trainer.train_model(new_data, {
+            'n_estimators': 100,
+            'max_depth': 10,
+            'random_state': 42
+        })
+        
+        # Validate new model
+        validation_results = self.validator.validate_model_performance({
+            'accuracy': 0.85,
+            'precision': 0.80,
+            'recall': 0.75
+        })
+        
+        # Deploy if validation passes
+        if all(result['passed'] for result in validation_results.values()):
+            await self.deploy_new_model(training_results['run_id'])
+            logging.info("New model deployed successfully")
+        else:
+            logging.warning("New model failed validation, keeping current model")
+```
+
+## Conclusion
+
+Production ML systems require comprehensive MLOps practices:
+
+- **Automated Training**: Version control, experiment tracking, and validation
+- **Scalable Deployment**: Containerization, orchestration, and load balancing  
+- **Continuous Monitoring**: Performance tracking, drift detection, and alerting
+- **Automated Response**: Retraining triggers and model updates
+
+Success in production ML depends on treating models as software products with proper engineering practices, monitoring, and maintenance processes.

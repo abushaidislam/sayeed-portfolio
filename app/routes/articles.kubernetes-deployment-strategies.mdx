@@ -1,0 +1,422 @@
+---
+title: 'Kubernetes Deployment Strategies: Blue-Green, Canary, and Rolling Updates'
+abstract: 'Master advanced Kubernetes deployment patterns including blue-green deployments, canary releases, and progressive delivery strategies for zero-downtime deployments.'
+date: '2024-02-01'
+banner: /articles/kubernetes-deployment/banner.jpg
+featured: false
+---
+
+## Introduction
+
+Kubernetes provides powerful deployment strategies that enable zero-downtime deployments, risk mitigation, and progressive rollouts. This article explores advanced deployment patterns used in production environments.
+
+## Rolling Updates Strategy
+
+```yaml
+# Deployment with rolling update strategy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp-deployment
+spec:
+  replicas: 10
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 2
+      maxSurge: 2
+  selector:
+    matchLabels:
+      app: webapp
+  template:
+    metadata:
+      labels:
+        app: webapp
+        version: v2.0
+    spec:
+      containers:
+      - name: webapp
+        image: myapp:v2.0
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 20
+```
+
+## Blue-Green Deployment
+
+```yaml
+# Blue environment (current production)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp-blue
+  labels:
+    app: webapp
+    version: blue
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: webapp
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: webapp
+        version: blue
+    spec:
+      containers:
+      - name: webapp
+        image: myapp:v1.0
+        ports:
+        - containerPort: 8080
+
+---
+# Green environment (new version)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp-green
+  labels:
+    app: webapp
+    version: green
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: webapp
+      version: green
+  template:
+    metadata:
+      labels:
+        app: webapp
+        version: green
+    spec:
+      containers:
+      - name: webapp
+        image: myapp:v2.0
+        ports:
+        - containerPort: 8080
+
+---
+# Service switching between blue and green
+apiVersion: v1
+kind: Service
+metadata:
+  name: webapp-service
+spec:
+  selector:
+    app: webapp
+    version: blue  # Switch to 'green' for deployment
+  ports:
+  - port: 80
+    targetPort: 8080
+  type: LoadBalancer
+```
+
+## Canary Deployment with Istio
+
+```yaml
+# Destination rule for traffic splitting
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: webapp-destination
+spec:
+  host: webapp-service
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+  - name: v2
+    labels:
+      version: v2
+
+---
+# Virtual service for canary traffic routing
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: webapp-vs
+spec:
+  hosts:
+  - webapp-service
+  http:
+  - match:
+    - headers:
+        canary:
+          exact: "true"
+    route:
+    - destination:
+        host: webapp-service
+        subset: v2
+  - route:
+    - destination:
+        host: webapp-service
+        subset: v1
+      weight: 90
+    - destination:
+        host: webapp-service
+        subset: v2
+      weight: 10  # 10% canary traffic
+```
+
+## Advanced Deployment Controller
+
+```javascript
+class DeploymentController {
+  constructor(k8sClient, monitoring) {
+    this.k8s = k8sClient;
+    this.monitoring = monitoring;
+  }
+
+  async executeCanaryDeployment(config) {
+    const { appName, newVersion, stages } = config;
+    
+    for (const stage of stages) {
+      await this.deployCanaryStage(appName, newVersion, stage);
+      
+      const metrics = await this.monitoring.getMetrics(appName, stage.duration);
+      
+      if (!this.validateMetrics(metrics, stage.thresholds)) {
+        await this.rollbackCanary(appName);
+        throw new Error(`Canary stage failed validation: ${JSON.stringify(metrics)}`);
+      }
+      
+      console.log(`Canary stage ${stage.name} completed successfully`);
+    }
+    
+    await this.promoteCanaryToProduction(appName, newVersion);
+  }
+
+  async deployCanaryStage(appName, version, stage) {
+    const deployment = {
+      apiVersion: 'apps/v1',
+      kind: 'Deployment',
+      metadata: {
+        name: `${appName}-canary`,
+        labels: { app: appName, version: 'canary' }
+      },
+      spec: {
+        replicas: stage.replicas,
+        selector: { matchLabels: { app: appName, version: 'canary' } },
+        template: {
+          metadata: { labels: { app: appName, version: 'canary' } },
+          spec: {
+            containers: [{
+              name: appName,
+              image: `${appName}:${version}`,
+              ports: [{ containerPort: 8080 }]
+            }]
+          }
+        }
+      }
+    };
+
+    await this.k8s.apps.v1.createNamespacedDeployment('default', deployment);
+    await this.updateTrafficSplit(appName, stage.trafficPercent);
+    await this.waitForRollout(`${appName}-canary`);
+  }
+
+  async updateTrafficSplit(appName, canaryPercent) {
+    const virtualService = {
+      apiVersion: 'networking.istio.io/v1beta1',
+      kind: 'VirtualService',
+      metadata: { name: `${appName}-vs` },
+      spec: {
+        hosts: [`${appName}-service`],
+        http: [{
+          route: [
+            {
+              destination: { host: `${appName}-service`, subset: 'stable' },
+              weight: 100 - canaryPercent
+            },
+            {
+              destination: { host: `${appName}-service`, subset: 'canary' },
+              weight: canaryPercent
+            }
+          ]
+        }]
+      }
+    };
+
+    await this.k8s.customObjects.replaceNamespacedCustomObject(
+      'networking.istio.io', 'v1beta1', 'default', 'virtualservices',
+      `${appName}-vs`, virtualService
+    );
+  }
+
+  validateMetrics(metrics, thresholds) {
+    return (
+      metrics.errorRate <= thresholds.maxErrorRate &&
+      metrics.responseTime <= thresholds.maxResponseTime &&
+      metrics.successRate >= thresholds.minSuccessRate
+    );
+  }
+}
+```
+
+## GitOps with ArgoCD
+
+```yaml
+# Application configuration for GitOps
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: webapp-staging
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/company/webapp-manifests
+    targetRevision: HEAD
+    path: staging
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: staging
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+---
+# Rollout strategy with Argo Rollouts
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: webapp-rollout
+spec:
+  replicas: 10
+  strategy:
+    canary:
+      steps:
+      - setWeight: 10
+      - pause: { duration: 10m }
+      - setWeight: 30
+      - pause: { duration: 10m }
+      - setWeight: 50
+      - pause: { duration: 10m }
+      canaryService: webapp-canary
+      stableService: webapp-stable
+      trafficRouting:
+        istio:
+          virtualService:
+            name: webapp-vs
+            routes:
+            - primary
+  selector:
+    matchLabels:
+      app: webapp
+  template:
+    metadata:
+      labels:
+        app: webapp
+    spec:
+      containers:
+      - name: webapp
+        image: webapp:stable
+        ports:
+        - containerPort: 8080
+```
+
+## Monitoring and Observability
+
+```javascript
+class DeploymentMonitoring {
+  constructor(prometheusClient, grafanaClient) {
+    this.prometheus = prometheusClient;
+    this.grafana = grafanaClient;
+  }
+
+  async getDeploymentMetrics(appName, timeRange = '5m') {
+    const queries = {
+      errorRate: `rate(http_requests_total{app="${appName}",status=~"5.."}[${timeRange}]) / rate(http_requests_total{app="${appName}"}[${timeRange}]) * 100`,
+      responseTime: `histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{app="${appName}"}[${timeRange}]))`,
+      throughput: `rate(http_requests_total{app="${appName}"}[${timeRange}])`,
+      cpuUsage: `rate(container_cpu_usage_seconds_total{pod=~"${appName}-.*"}[${timeRange}]) * 100`,
+      memoryUsage: `container_memory_working_set_bytes{pod=~"${appName}-.*"} / container_spec_memory_limit_bytes * 100`
+    };
+
+    const results = {};
+    for (const [metric, query] of Object.entries(queries)) {
+      try {
+        const response = await this.prometheus.query(query);
+        results[metric] = this.parsePrometheusResponse(response);
+      } catch (error) {
+        console.error(`Failed to fetch ${metric}:`, error);
+        results[metric] = null;
+      }
+    }
+
+    return results;
+  }
+
+  async createDeploymentDashboard(appName) {
+    const dashboard = {
+      dashboard: {
+        title: `${appName} Deployment Dashboard`,
+        panels: [
+          {
+            title: 'Error Rate',
+            type: 'stat',
+            targets: [{
+              expr: `rate(http_requests_total{app="${appName}",status=~"5.."}[5m]) / rate(http_requests_total{app="${appName}"}[5m]) * 100`
+            }],
+            thresholds: [
+              { color: 'green', value: 0 },
+              { color: 'yellow', value: 1 },
+              { color: 'red', value: 5 }
+            ]
+          },
+          {
+            title: 'Response Time (95th percentile)',
+            type: 'graph',
+            targets: [{
+              expr: `histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{app="${appName}"}[5m]))`
+            }]
+          },
+          {
+            title: 'Pod Status',
+            type: 'table',
+            targets: [{
+              expr: `kube_pod_status_phase{pod=~"${appName}-.*"}`
+            }]
+          }
+        ]
+      }
+    };
+
+    return await this.grafana.createDashboard(dashboard);
+  }
+}
+```
+
+## Conclusion
+
+Kubernetes deployment strategies provide powerful tools for safe, reliable application updates:
+
+- **Rolling Updates**: Default strategy for gradual updates
+- **Blue-Green**: Instant switching with full rollback capability  
+- **Canary**: Risk mitigation through gradual traffic shifting
+- **GitOps**: Declarative, version-controlled deployments
+
+Choose the right strategy based on your risk tolerance, infrastructure, and business requirements. Combine with proper monitoring and automated rollback mechanisms for production-ready deployments.
