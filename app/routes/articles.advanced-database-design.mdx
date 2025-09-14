@@ -1,0 +1,729 @@
+---
+title: 'Advanced Database Design: Indexing, Partitioning, and Query Optimization'
+abstract: 'Master advanced database concepts including B-tree indexing, horizontal partitioning strategies, and query optimization techniques for high-performance applications.'
+date: '2024-01-25'
+banner: /articles/advanced-database-design/banner.jpg
+featured: false
+---
+
+## Introduction
+
+Database performance is critical for modern applications handling large datasets and high traffic loads. This article explores advanced techniques for optimizing database performance through strategic indexing, partitioning, and query optimization.
+
+## Advanced Indexing Strategies
+
+### Composite Indexes and Index Optimization
+
+```sql
+-- Example schema for e-commerce platform
+CREATE TABLE orders (
+    id BIGINT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    total_amount DECIMAL(10,2) NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+
+-- Strategic composite index for common query patterns
+CREATE INDEX idx_orders_user_status_created 
+ON orders (user_id, status, created_at DESC);
+
+-- This index efficiently supports queries like:
+-- SELECT * FROM orders 
+-- WHERE user_id = 12345 AND status = 'pending' 
+-- ORDER BY created_at DESC;
+
+-- Partial index for specific conditions
+CREATE INDEX idx_orders_pending 
+ON orders (created_at DESC) 
+WHERE status = 'pending';
+
+-- Expression-based index for calculated values
+CREATE INDEX idx_orders_month_year 
+ON orders (EXTRACT(YEAR FROM created_at), EXTRACT(MONTH FROM created_at));
+```
+
+### Index Performance Analysis
+
+```sql
+-- Analyze index usage and performance
+EXPLAIN (ANALYZE, BUFFERS) 
+SELECT o.*, u.name 
+FROM orders o 
+JOIN users u ON o.user_id = u.id 
+WHERE o.status = 'shipped' 
+  AND o.created_at >= '2024-01-01'
+ORDER BY o.created_at DESC 
+LIMIT 20;
+
+-- Monitor index usage statistics
+SELECT 
+    schemaname,
+    tablename,
+    indexname,
+    idx_tup_read,
+    idx_tup_fetch,
+    idx_scan
+FROM pg_stat_user_indexes 
+WHERE schemaname = 'public'
+ORDER BY idx_scan DESC;
+
+-- Identify unused indexes
+SELECT 
+    schemaname,
+    tablename,
+    indexname,
+    pg_size_pretty(pg_relation_size(indexrelid)) as size
+FROM pg_stat_user_indexes 
+WHERE idx_scan = 0 
+  AND schemaname = 'public';
+```
+
+## Database Partitioning Strategies
+
+### Horizontal Partitioning (Sharding)
+
+```sql
+-- Time-based partitioning for orders table
+CREATE TABLE orders_2024_q1 PARTITION OF orders
+FOR VALUES FROM ('2024-01-01') TO ('2024-04-01');
+
+CREATE TABLE orders_2024_q2 PARTITION OF orders
+FOR VALUES FROM ('2024-04-01') TO ('2024-07-01');
+
+CREATE TABLE orders_2024_q3 PARTITION OF orders
+FOR VALUES FROM ('2024-07-01') TO ('2024-10-01');
+
+CREATE TABLE orders_2024_q4 PARTITION OF orders
+FOR VALUES FROM ('2024-10-01') TO ('2025-01-01');
+
+-- Hash partitioning for even distribution
+CREATE TABLE users_partitioned (
+    id BIGINT,
+    email VARCHAR(255),
+    name VARCHAR(255),
+    created_at TIMESTAMP
+) PARTITION BY HASH (id);
+
+CREATE TABLE users_part_0 PARTITION OF users_partitioned
+FOR VALUES WITH (MODULUS 4, REMAINDER 0);
+
+CREATE TABLE users_part_1 PARTITION OF users_partitioned
+FOR VALUES WITH (MODULUS 4, REMAINDER 1);
+
+CREATE TABLE users_part_2 PARTITION OF users_partitioned
+FOR VALUES WITH (MODULUS 4, REMAINDER 2);
+
+CREATE TABLE users_part_3 PARTITION OF users_partitioned
+FOR VALUES WITH (MODULUS 4, REMAINDER 3);
+```
+
+### Application-Level Sharding Implementation
+
+```javascript
+class DatabaseShardManager {
+  constructor(shardConfigs) {
+    this.shards = shardConfigs.map(config => ({
+      id: config.id,
+      connection: new DatabaseConnection(config),
+      weight: config.weight || 1
+    }));
+    this.totalWeight = this.shards.reduce((sum, shard) => sum + shard.weight, 0);
+  }
+
+  // Consistent hashing for user data
+  getUserShard(userId) {
+    const hash = this.hashFunction(userId.toString());
+    const shardIndex = hash % this.shards.length;
+    return this.shards[shardIndex];
+  }
+
+  // Range-based sharding for time-series data
+  getTimeShard(timestamp) {
+    const date = new Date(timestamp);
+    const year = date.getFullYear();
+    const quarter = Math.floor(date.getMonth() / 3) + 1;
+    const shardKey = `${year}_q${quarter}`;
+    
+    return this.shards.find(shard => 
+      shard.id.includes(shardKey)
+    ) || this.shards[0]; // fallback
+  }
+
+  // Weighted round-robin for read replicas
+  getReadShard() {
+    let random = Math.random() * this.totalWeight;
+    
+    for (const shard of this.shards) {
+      random -= shard.weight;
+      if (random <= 0) {
+        return shard;
+      }
+    }
+    
+    return this.shards[0]; // fallback
+  }
+
+  async executeQuery(shardingKey, query, params) {
+    const shard = this.getUserShard(shardingKey);
+    
+    try {
+      return await shard.connection.query(query, params);
+    } catch (error) {
+      console.error(`Query failed on shard ${shard.id}:`, error);
+      throw error;
+    }
+  }
+
+  // Cross-shard aggregation
+  async aggregateAcrossShards(query, params) {
+    const promises = this.shards.map(shard => 
+      shard.connection.query(query, params)
+        .catch(error => {
+          console.error(`Aggregation failed on shard ${shard.id}:`, error);
+          return { rows: [] }; // Return empty result for failed shards
+        })
+    );
+
+    const results = await Promise.all(promises);
+    return results.reduce((combined, result) => {
+      combined.rows.push(...result.rows);
+      return combined;
+    }, { rows: [] });
+  }
+
+  hashFunction(key) {
+    let hash = 0;
+    for (let i = 0; i < key.length; i++) {
+      const char = key.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32-bit integer
+    }
+    return Math.abs(hash);
+  }
+}
+
+// Usage example
+const shardManager = new DatabaseShardManager([
+  { id: 'shard_1', host: 'db1.example.com', database: 'app_shard_1' },
+  { id: 'shard_2', host: 'db2.example.com', database: 'app_shard_2' },
+  { id: 'shard_3', host: 'db3.example.com', database: 'app_shard_3' }
+]);
+
+class UserService {
+  constructor(shardManager) {
+    this.shardManager = shardManager;
+  }
+
+  async createUser(userData) {
+    const query = `
+      INSERT INTO users (email, name, created_at) 
+      VALUES ($1, $2, $3) 
+      RETURNING *
+    `;
+    
+    const userId = this.generateUserId();
+    const params = [userData.email, userData.name, new Date()];
+    
+    return await this.shardManager.executeQuery(userId, query, params);
+  }
+
+  async getUserById(userId) {
+    const query = 'SELECT * FROM users WHERE id = $1';
+    return await this.shardManager.executeQuery(userId, query, [userId]);
+  }
+
+  // Cross-shard search (expensive operation)
+  async searchUsers(searchTerm) {
+    const query = `
+      SELECT * FROM users 
+      WHERE name ILIKE $1 OR email ILIKE $1 
+      LIMIT 50
+    `;
+    
+    const results = await this.shardManager.aggregateAcrossShards(
+      query, 
+      [`%${searchTerm}%`]
+    );
+    
+    // Sort and limit combined results
+    return results.rows
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .slice(0, 50);
+  }
+}
+```
+
+## Query Optimization Techniques
+
+### Advanced Query Patterns
+
+```sql
+-- Window functions for complex analytics
+SELECT 
+    user_id,
+    order_date,
+    total_amount,
+    -- Running total per user
+    SUM(total_amount) OVER (
+        PARTITION BY user_id 
+        ORDER BY order_date 
+        ROWS UNBOUNDED PRECEDING
+    ) as running_total,
+    -- Rank orders by amount within each month
+    RANK() OVER (
+        PARTITION BY DATE_TRUNC('month', order_date)
+        ORDER BY total_amount DESC
+    ) as monthly_rank,
+    -- Previous order amount for comparison
+    LAG(total_amount, 1) OVER (
+        PARTITION BY user_id 
+        ORDER BY order_date
+    ) as previous_order_amount
+FROM orders
+WHERE order_date >= '2024-01-01';
+
+-- Common Table Expressions for complex queries
+WITH monthly_sales AS (
+    SELECT 
+        DATE_TRUNC('month', created_at) as month,
+        COUNT(*) as order_count,
+        SUM(total_amount) as total_revenue
+    FROM orders
+    WHERE status = 'completed'
+    GROUP BY DATE_TRUNC('month', created_at)
+),
+growth_rates AS (
+    SELECT 
+        month,
+        order_count,
+        total_revenue,
+        LAG(total_revenue) OVER (ORDER BY month) as prev_revenue,
+        (total_revenue - LAG(total_revenue) OVER (ORDER BY month)) / 
+        LAG(total_revenue) OVER (ORDER BY month) * 100 as growth_rate
+    FROM monthly_sales
+)
+SELECT * FROM growth_rates
+WHERE growth_rate IS NOT NULL
+ORDER BY month DESC;
+
+-- Efficient bulk operations
+INSERT INTO orders (user_id, total_amount, status, created_at)
+VALUES 
+    (1, 100.00, 'pending', NOW()),
+    (2, 150.00, 'pending', NOW()),
+    (3, 200.00, 'pending', NOW())
+ON CONFLICT (id) DO UPDATE SET
+    total_amount = EXCLUDED.total_amount,
+    updated_at = NOW();
+```
+
+### Query Performance Monitoring
+
+```javascript
+// Query performance monitoring middleware
+class QueryPerformanceMonitor {
+  constructor() {
+    this.slowQueryThreshold = 1000; // 1 second
+    this.queryStats = new Map();
+  }
+
+  async executeWithMonitoring(query, params, connection) {
+    const startTime = Date.now();
+    const queryHash = this.hashQuery(query);
+    
+    try {
+      const result = await connection.query(query, params);
+      const executionTime = Date.now() - startTime;
+      
+      this.recordQueryStats(queryHash, query, executionTime, true);
+      
+      if (executionTime > this.slowQueryThreshold) {
+        this.logSlowQuery(query, params, executionTime);
+      }
+      
+      return result;
+    } catch (error) {
+      const executionTime = Date.now() - startTime;
+      this.recordQueryStats(queryHash, query, executionTime, false);
+      throw error;
+    }
+  }
+
+  recordQueryStats(queryHash, query, executionTime, success) {
+    if (!this.queryStats.has(queryHash)) {
+      this.queryStats.set(queryHash, {
+        query: this.normalizeQuery(query),
+        totalExecutions: 0,
+        totalTime: 0,
+        avgTime: 0,
+        maxTime: 0,
+        minTime: Infinity,
+        errors: 0
+      });
+    }
+
+    const stats = this.queryStats.get(queryHash);
+    stats.totalExecutions++;
+    stats.totalTime += executionTime;
+    stats.avgTime = stats.totalTime / stats.totalExecutions;
+    stats.maxTime = Math.max(stats.maxTime, executionTime);
+    stats.minTime = Math.min(stats.minTime, executionTime);
+    
+    if (!success) {
+      stats.errors++;
+    }
+  }
+
+  logSlowQuery(query, params, executionTime) {
+    console.warn('Slow query detected:', {
+      query: this.normalizeQuery(query),
+      params,
+      executionTime: `${executionTime}ms`,
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  normalizeQuery(query) {
+    // Remove extra whitespace and normalize for grouping
+    return query.replace(/\s+/g, ' ').trim();
+  }
+
+  hashQuery(query) {
+    // Simple hash function for query grouping
+    let hash = 0;
+    const normalized = this.normalizeQuery(query);
+    
+    for (let i = 0; i < normalized.length; i++) {
+      const char = normalized.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash;
+    }
+    
+    return hash.toString();
+  }
+
+  getPerformanceReport() {
+    const sortedStats = Array.from(this.queryStats.values())
+      .sort((a, b) => b.avgTime - a.avgTime);
+
+    return {
+      slowestQueries: sortedStats.slice(0, 10),
+      totalQueries: sortedStats.reduce((sum, stat) => sum + stat.totalExecutions, 0),
+      averageExecutionTime: sortedStats.reduce((sum, stat) => sum + stat.avgTime, 0) / sortedStats.length
+    };
+  }
+}
+```
+
+## Connection Pooling and Caching
+
+### Advanced Connection Pool Management
+
+```javascript
+class AdvancedConnectionPool {
+  constructor(config) {
+    this.config = {
+      minConnections: 5,
+      maxConnections: 20,
+      acquireTimeout: 30000,
+      idleTimeout: 300000,
+      maxLifetime: 3600000,
+      ...config
+    };
+    
+    this.connections = [];
+    this.availableConnections = [];
+    this.pendingRequests = [];
+    this.stats = {
+      created: 0,
+      acquired: 0,
+      released: 0,
+      destroyed: 0
+    };
+    
+    this.initialize();
+  }
+
+  async initialize() {
+    // Create minimum connections
+    for (let i = 0; i < this.config.minConnections; i++) {
+      const connection = await this.createConnection();
+      this.connections.push(connection);
+      this.availableConnections.push(connection);
+    }
+
+    // Start maintenance interval
+    setInterval(() => this.maintainPool(), 60000); // Every minute
+  }
+
+  async createConnection() {
+    const connection = {
+      id: `conn_${++this.stats.created}`,
+      raw: await this.establishDatabaseConnection(),
+      createdAt: Date.now(),
+      lastUsed: Date.now(),
+      inUse: false,
+      queryCount: 0
+    };
+
+    return connection;
+  }
+
+  async acquire() {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const index = this.pendingRequests.findIndex(req => req.resolve === resolve);
+        if (index > -1) {
+          this.pendingRequests.splice(index, 1);
+        }
+        reject(new Error('Connection acquire timeout'));
+      }, this.config.acquireTimeout);
+
+      if (this.availableConnections.length > 0) {
+        clearTimeout(timeout);
+        const connection = this.availableConnections.pop();
+        connection.inUse = true;
+        connection.lastUsed = Date.now();
+        this.stats.acquired++;
+        resolve(connection);
+        return;
+      }
+
+      // Try to create new connection if under limit
+      if (this.connections.length < this.config.maxConnections) {
+        this.createConnection()
+          .then(connection => {
+            clearTimeout(timeout);
+            this.connections.push(connection);
+            connection.inUse = true;
+            connection.lastUsed = Date.now();
+            this.stats.acquired++;
+            resolve(connection);
+          })
+          .catch(error => {
+            clearTimeout(timeout);
+            reject(error);
+          });
+        return;
+      }
+
+      // Queue the request
+      this.pendingRequests.push({ resolve, reject, timeout });
+    });
+  }
+
+  release(connection) {
+    if (!connection.inUse) {
+      console.warn('Attempting to release connection that is not in use');
+      return;
+    }
+
+    connection.inUse = false;
+    connection.lastUsed = Date.now();
+    connection.queryCount++;
+    this.stats.released++;
+
+    // Serve pending requests first
+    if (this.pendingRequests.length > 0) {
+      const request = this.pendingRequests.shift();
+      clearTimeout(request.timeout);
+      connection.inUse = true;
+      this.stats.acquired++;
+      request.resolve(connection);
+      return;
+    }
+
+    this.availableConnections.push(connection);
+  }
+
+  async maintainPool() {
+    const now = Date.now();
+    
+    // Remove old or idle connections
+    const connectionsToRemove = this.connections.filter(conn => 
+      !conn.inUse && (
+        (now - conn.lastUsed > this.config.idleTimeout) ||
+        (now - conn.createdAt > this.config.maxLifetime)
+      )
+    );
+
+    for (const conn of connectionsToRemove) {
+      await this.destroyConnection(conn);
+    }
+
+    // Ensure minimum connections
+    while (this.availableConnections.length < this.config.minConnections) {
+      try {
+        const connection = await this.createConnection();
+        this.connections.push(connection);
+        this.availableConnections.push(connection);
+      } catch (error) {
+        console.error('Failed to create minimum connection:', error);
+        break;
+      }
+    }
+  }
+
+  async destroyConnection(connection) {
+    try {
+      await connection.raw.end();
+      
+      // Remove from all arrays
+      this.connections = this.connections.filter(conn => conn.id !== connection.id);
+      this.availableConnections = this.availableConnections.filter(conn => conn.id !== connection.id);
+      
+      this.stats.destroyed++;
+    } catch (error) {
+      console.error('Error destroying connection:', error);
+    }
+  }
+
+  getStats() {
+    return {
+      ...this.stats,
+      totalConnections: this.connections.length,
+      availableConnections: this.availableConnections.length,
+      inUseConnections: this.connections.filter(conn => conn.inUse).length,
+      pendingRequests: this.pendingRequests.length
+    };
+  }
+}
+```
+
+### Multi-Level Caching Strategy
+
+```javascript
+class MultiLevelCache {
+  constructor() {
+    this.l1Cache = new Map(); // In-memory cache
+    this.l2Cache = new RedisClient(); // Redis cache
+    this.stats = {
+      l1Hits: 0,
+      l2Hits: 0,
+      misses: 0
+    };
+  }
+
+  async get(key) {
+    // L1 Cache (in-memory)
+    if (this.l1Cache.has(key)) {
+      this.stats.l1Hits++;
+      return this.l1Cache.get(key).value;
+    }
+
+    // L2 Cache (Redis)
+    const l2Value = await this.l2Cache.get(key);
+    if (l2Value) {
+      this.stats.l2Hits++;
+      const parsed = JSON.parse(l2Value);
+      
+      // Promote to L1
+      this.l1Cache.set(key, {
+        value: parsed,
+        expires: Date.now() + 300000 // 5 minutes
+      });
+      
+      return parsed;
+    }
+
+    this.stats.misses++;
+    return null;
+  }
+
+  async set(key, value, ttl = 3600) {
+    // Set in both caches
+    this.l1Cache.set(key, {
+      value,
+      expires: Date.now() + Math.min(ttl * 1000, 300000)
+    });
+    
+    await this.l2Cache.setex(key, ttl, JSON.stringify(value));
+  }
+
+  async invalidate(key) {
+    this.l1Cache.delete(key);
+    await this.l2Cache.del(key);
+  }
+
+  // Cache-aside pattern for database queries
+  async executeWithCache(key, queryFunction, ttl = 3600) {
+    // Try cache first
+    let result = await this.get(key);
+    
+    if (result === null) {
+      // Cache miss - execute query
+      result = await queryFunction();
+      
+      if (result) {
+        await this.set(key, result, ttl);
+      }
+    }
+    
+    return result;
+  }
+
+  // Periodic cleanup of expired L1 cache entries
+  cleanup() {
+    const now = Date.now();
+    for (const [key, entry] of this.l1Cache.entries()) {
+      if (entry.expires < now) {
+        this.l1Cache.delete(key);
+      }
+    }
+  }
+}
+
+// Usage example
+class UserRepository {
+  constructor(database, cache) {
+    this.db = database;
+    this.cache = cache;
+  }
+
+  async getUserById(userId) {
+    const cacheKey = `user:${userId}`;
+    
+    return await this.cache.executeWithCache(
+      cacheKey,
+      async () => {
+        const result = await this.db.query(
+          'SELECT * FROM users WHERE id = $1',
+          [userId]
+        );
+        return result.rows[0] || null;
+      },
+      1800 // 30 minutes TTL
+    );
+  }
+
+  async updateUser(userId, updateData) {
+    const result = await this.db.query(
+      'UPDATE users SET name = $1, email = $2, updated_at = NOW() WHERE id = $3 RETURNING *',
+      [updateData.name, updateData.email, userId]
+    );
+
+    // Invalidate cache
+    await this.cache.invalidate(`user:${userId}`);
+    
+    return result.rows[0];
+  }
+}
+```
+
+## Conclusion
+
+Advanced database design requires a deep understanding of indexing strategies, partitioning techniques, and query optimization. The key principles include:
+
+1. **Strategic Indexing**: Create indexes that match your query patterns, use composite indexes effectively, and regularly monitor index usage.
+
+2. **Effective Partitioning**: Choose appropriate partitioning strategies based on your data access patterns and growth projections.
+
+3. **Query Optimization**: Use EXPLAIN plans, window functions, and CTEs to write efficient queries.
+
+4. **Connection Management**: Implement proper connection pooling to handle concurrent access efficiently.
+
+5. **Caching Strategy**: Use multi-level caching to reduce database load and improve response times.
+
+Remember that optimization is an iterative process. Monitor your database performance continuously and adjust your strategies based on real-world usage patterns and performance metrics.

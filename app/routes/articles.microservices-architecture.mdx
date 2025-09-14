@@ -1,0 +1,616 @@
+---
+title: 'Microservices Architecture: Design Patterns and Best Practices'
+abstract: 'Deep dive into microservices architecture patterns, service communication strategies, and distributed system challenges with practical implementation examples.'
+date: '2024-01-20'
+banner: /articles/microservices-architecture/banner.jpg
+featured: false
+---
+
+## Introduction to Microservices
+
+Microservices architecture has become the de facto standard for building scalable, distributed applications. This architectural pattern structures an application as a collection of loosely coupled services, each responsible for a specific business capability.
+
+## Core Principles of Microservices
+
+### Single Responsibility Principle
+Each microservice should have a single, well-defined business responsibility.
+
+```javascript
+// User Service - Handles user management
+class UserService {
+  async createUser(userData) {
+    const user = await this.userRepository.create(userData);
+    await this.eventBus.publish('user.created', { userId: user.id });
+    return user;
+  }
+
+  async getUserById(id) {
+    return await this.userRepository.findById(id);
+  }
+
+  async updateUser(id, updateData) {
+    const user = await this.userRepository.update(id, updateData);
+    await this.eventBus.publish('user.updated', { userId: id });
+    return user;
+  }
+}
+
+// Order Service - Handles order processing
+class OrderService {
+  async createOrder(orderData) {
+    // Validate user exists via User Service
+    const user = await this.userServiceClient.getUser(orderData.userId);
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    const order = await this.orderRepository.create(orderData);
+    await this.eventBus.publish('order.created', { orderId: order.id });
+    return order;
+  }
+}
+```
+
+## Service Communication Patterns
+
+### Synchronous Communication with REST APIs
+
+```javascript
+// API Gateway implementation
+class APIGateway {
+  constructor() {
+    this.services = {
+      user: new ServiceClient('http://user-service:3001'),
+      order: new ServiceClient('http://order-service:3002'),
+      payment: new ServiceClient('http://payment-service:3003')
+    };
+  }
+
+  async handleRequest(req, res) {
+    try {
+      switch (req.path) {
+        case '/api/users':
+          return await this.services.user.request(req);
+        case '/api/orders':
+          return await this.services.order.request(req);
+        case '/api/payments':
+          return await this.services.payment.request(req);
+        default:
+          throw new Error('Route not found');
+      }
+    } catch (error) {
+      return this.handleError(error, res);
+    }
+  }
+
+  async handleError(error, res) {
+    if (error.code === 'SERVICE_UNAVAILABLE') {
+      return res.status(503).json({ 
+        error: 'Service temporarily unavailable' 
+      });
+    }
+    return res.status(500).json({ error: error.message });
+  }
+}
+```
+
+### Asynchronous Communication with Event-Driven Architecture
+
+```javascript
+// Event Bus implementation using Redis
+class EventBus {
+  constructor(redisClient) {
+    this.redis = redisClient;
+    this.subscribers = new Map();
+  }
+
+  async publish(eventType, payload) {
+    const event = {
+      id: uuidv4(),
+      type: eventType,
+      payload,
+      timestamp: new Date().toISOString()
+    };
+
+    await this.redis.publish(eventType, JSON.stringify(event));
+    console.log(`Published event: ${eventType}`, event);
+  }
+
+  subscribe(eventType, handler) {
+    if (!this.subscribers.has(eventType)) {
+      this.subscribers.set(eventType, []);
+      this.redis.subscribe(eventType);
+    }
+    
+    this.subscribers.get(eventType).push(handler);
+  }
+
+  async handleMessage(channel, message) {
+    const handlers = this.subscribers.get(channel) || [];
+    const event = JSON.parse(message);
+    
+    // Process handlers concurrently
+    await Promise.all(
+      handlers.map(handler => 
+        handler(event).catch(error => 
+          console.error(`Handler error for ${channel}:`, error)
+        )
+      )
+    );
+  }
+}
+
+// Service using event-driven communication
+class InventoryService {
+  constructor(eventBus) {
+    this.eventBus = eventBus;
+    this.setupEventHandlers();
+  }
+
+  setupEventHandlers() {
+    this.eventBus.subscribe('order.created', this.handleOrderCreated.bind(this));
+    this.eventBus.subscribe('order.cancelled', this.handleOrderCancelled.bind(this));
+  }
+
+  async handleOrderCreated(event) {
+    const { orderId, items } = event.payload;
+    
+    try {
+      await this.reserveItems(items);
+      await this.eventBus.publish('inventory.reserved', { orderId, items });
+    } catch (error) {
+      await this.eventBus.publish('inventory.reservation.failed', { 
+        orderId, 
+        error: error.message 
+      });
+    }
+  }
+
+  async reserveItems(items) {
+    for (const item of items) {
+      const inventory = await this.inventoryRepository.findById(item.productId);
+      if (inventory.quantity < item.quantity) {
+        throw new Error(`Insufficient inventory for product ${item.productId}`);
+      }
+      
+      await this.inventoryRepository.updateQuantity(
+        item.productId, 
+        inventory.quantity - item.quantity
+      );
+    }
+  }
+}
+```
+
+## Data Management Patterns
+
+### Database per Service
+
+```javascript
+// User Service with its own database
+class UserService {
+  constructor() {
+    this.db = new PostgresConnection({
+      host: process.env.USER_DB_HOST,
+      database: 'user_service_db'
+    });
+  }
+
+  async createUser(userData) {
+    const query = `
+      INSERT INTO users (email, name, created_at) 
+      VALUES ($1, $2, $3) 
+      RETURNING *
+    `;
+    
+    return await this.db.query(query, [
+      userData.email,
+      userData.name,
+      new Date()
+    ]);
+  }
+}
+
+// Order Service with its own database
+class OrderService {
+  constructor() {
+    this.db = new MongoConnection({
+      uri: process.env.ORDER_DB_URI,
+      database: 'order_service_db'
+    });
+  }
+
+  async createOrder(orderData) {
+    const order = {
+      ...orderData,
+      status: 'pending',
+      createdAt: new Date()
+    };
+    
+    return await this.db.collection('orders').insertOne(order);
+  }
+}
+```
+
+### Saga Pattern for Distributed Transactions
+
+```javascript
+// Order Saga Orchestrator
+class OrderSaga {
+  constructor(eventBus) {
+    this.eventBus = eventBus;
+    this.sagaSteps = new Map();
+    this.setupEventHandlers();
+  }
+
+  async startOrderSaga(orderData) {
+    const sagaId = uuidv4();
+    
+    this.sagaSteps.set(sagaId, {
+      currentStep: 'payment',
+      completedSteps: [],
+      orderData,
+      status: 'active'
+    });
+
+    // Start with payment processing
+    await this.eventBus.publish('payment.process', {
+      sagaId,
+      amount: orderData.total,
+      paymentMethod: orderData.paymentMethod
+    });
+  }
+
+  setupEventHandlers() {
+    this.eventBus.subscribe('payment.processed', this.handlePaymentProcessed.bind(this));
+    this.eventBus.subscribe('payment.failed', this.handlePaymentFailed.bind(this));
+    this.eventBus.subscribe('inventory.reserved', this.handleInventoryReserved.bind(this));
+    this.eventBus.subscribe('inventory.reservation.failed', this.handleInventoryFailed.bind(this));
+  }
+
+  async handlePaymentProcessed(event) {
+    const { sagaId } = event.payload;
+    const saga = this.sagaSteps.get(sagaId);
+    
+    if (!saga) return;
+
+    saga.completedSteps.push('payment');
+    saga.currentStep = 'inventory';
+
+    // Process inventory reservation
+    await this.eventBus.publish('inventory.reserve', {
+      sagaId,
+      items: saga.orderData.items
+    });
+  }
+
+  async handlePaymentFailed(event) {
+    const { sagaId, error } = event.payload;
+    await this.rollbackSaga(sagaId, 'payment_failed', error);
+  }
+
+  async rollbackSaga(sagaId, reason, error) {
+    const saga = this.sagaSteps.get(sagaId);
+    if (!saga) return;
+
+    saga.status = 'failed';
+    
+    // Rollback completed steps in reverse order
+    for (const step of saga.completedSteps.reverse()) {
+      await this.rollbackStep(step, sagaId, saga.orderData);
+    }
+
+    await this.eventBus.publish('order.saga.failed', {
+      sagaId,
+      reason,
+      error
+    });
+  }
+
+  async rollbackStep(step, sagaId, orderData) {
+    switch (step) {
+      case 'payment':
+        await this.eventBus.publish('payment.refund', {
+          sagaId,
+          amount: orderData.total
+        });
+        break;
+      case 'inventory':
+        await this.eventBus.publish('inventory.release', {
+          sagaId,
+          items: orderData.items
+        });
+        break;
+    }
+  }
+}
+```
+
+## Service Discovery and Load Balancing
+
+```javascript
+// Service Registry
+class ServiceRegistry {
+  constructor() {
+    this.services = new Map();
+    this.healthCheckInterval = 30000; // 30 seconds
+    this.startHealthChecks();
+  }
+
+  registerService(serviceName, instance) {
+    if (!this.services.has(serviceName)) {
+      this.services.set(serviceName, []);
+    }
+    
+    const serviceInstances = this.services.get(serviceName);
+    serviceInstances.push({
+      ...instance,
+      registeredAt: new Date(),
+      healthy: true,
+      lastHealthCheck: new Date()
+    });
+
+    console.log(`Service registered: ${serviceName}`, instance);
+  }
+
+  discoverService(serviceName) {
+    const instances = this.services.get(serviceName) || [];
+    const healthyInstances = instances.filter(instance => instance.healthy);
+    
+    if (healthyInstances.length === 0) {
+      throw new Error(`No healthy instances found for service: ${serviceName}`);
+    }
+
+    // Round-robin load balancing
+    const selectedInstance = healthyInstances[
+      Math.floor(Math.random() * healthyInstances.length)
+    ];
+    
+    return selectedInstance;
+  }
+
+  async startHealthChecks() {
+    setInterval(async () => {
+      for (const [serviceName, instances] of this.services) {
+        for (const instance of instances) {
+          try {
+            const response = await fetch(`${instance.url}/health`);
+            instance.healthy = response.ok;
+            instance.lastHealthCheck = new Date();
+          } catch (error) {
+            instance.healthy = false;
+            console.warn(`Health check failed for ${serviceName}:`, error.message);
+          }
+        }
+      }
+    }, this.healthCheckInterval);
+  }
+}
+
+// Load Balancer
+class LoadBalancer {
+  constructor(serviceRegistry) {
+    this.serviceRegistry = serviceRegistry;
+  }
+
+  async forwardRequest(serviceName, request) {
+    const maxRetries = 3;
+    let lastError;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const instance = this.serviceRegistry.discoverService(serviceName);
+        const response = await this.makeRequest(instance, request);
+        return response;
+      } catch (error) {
+        lastError = error;
+        console.warn(`Request failed, attempt ${attempt + 1}:`, error.message);
+        
+        if (attempt < maxRetries - 1) {
+          await this.sleep(Math.pow(2, attempt) * 1000); // Exponential backoff
+        }
+      }
+    }
+
+    throw new Error(`Service unavailable after ${maxRetries} attempts: ${lastError.message}`);
+  }
+
+  async makeRequest(instance, request) {
+    const url = `${instance.url}${request.path}`;
+    const response = await fetch(url, {
+      method: request.method,
+      headers: request.headers,
+      body: request.body
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    return response;
+  }
+
+  sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+}
+```
+
+## Circuit Breaker Pattern
+
+```javascript
+class CircuitBreaker {
+  constructor(options = {}) {
+    this.failureThreshold = options.failureThreshold || 5;
+    this.recoveryTimeout = options.recoveryTimeout || 60000;
+    this.monitoringPeriod = options.monitoringPeriod || 10000;
+    
+    this.state = 'CLOSED'; // CLOSED, OPEN, HALF_OPEN
+    this.failureCount = 0;
+    this.lastFailureTime = null;
+    this.successCount = 0;
+  }
+
+  async execute(operation) {
+    if (this.state === 'OPEN') {
+      if (Date.now() - this.lastFailureTime < this.recoveryTimeout) {
+        throw new Error('Circuit breaker is OPEN');
+      }
+      this.state = 'HALF_OPEN';
+      this.successCount = 0;
+    }
+
+    try {
+      const result = await operation();
+      this.onSuccess();
+      return result;
+    } catch (error) {
+      this.onFailure();
+      throw error;
+    }
+  }
+
+  onSuccess() {
+    this.failureCount = 0;
+    
+    if (this.state === 'HALF_OPEN') {
+      this.successCount++;
+      if (this.successCount >= 3) { // Require 3 successes to close
+        this.state = 'CLOSED';
+      }
+    }
+  }
+
+  onFailure() {
+    this.failureCount++;
+    this.lastFailureTime = Date.now();
+    
+    if (this.failureCount >= this.failureThreshold) {
+      this.state = 'OPEN';
+    }
+  }
+
+  getState() {
+    return {
+      state: this.state,
+      failureCount: this.failureCount,
+      lastFailureTime: this.lastFailureTime
+    };
+  }
+}
+
+// Usage in service client
+class ServiceClient {
+  constructor(serviceUrl) {
+    this.serviceUrl = serviceUrl;
+    this.circuitBreaker = new CircuitBreaker({
+      failureThreshold: 3,
+      recoveryTimeout: 30000
+    });
+  }
+
+  async makeRequest(path, options = {}) {
+    return await this.circuitBreaker.execute(async () => {
+      const response = await fetch(`${this.serviceUrl}${path}`, options);
+      
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      
+      return await response.json();
+    });
+  }
+}
+```
+
+## Monitoring and Observability
+
+```javascript
+// Distributed Tracing
+class TracingService {
+  constructor() {
+    this.activeSpans = new Map();
+  }
+
+  startSpan(operationName, parentSpanId = null) {
+    const spanId = uuidv4();
+    const span = {
+      spanId,
+      operationName,
+      parentSpanId,
+      startTime: Date.now(),
+      tags: {},
+      logs: []
+    };
+
+    this.activeSpans.set(spanId, span);
+    return spanId;
+  }
+
+  addTag(spanId, key, value) {
+    const span = this.activeSpans.get(spanId);
+    if (span) {
+      span.tags[key] = value;
+    }
+  }
+
+  log(spanId, message, data = {}) {
+    const span = this.activeSpans.get(spanId);
+    if (span) {
+      span.logs.push({
+        timestamp: Date.now(),
+        message,
+        data
+      });
+    }
+  }
+
+  finishSpan(spanId, error = null) {
+    const span = this.activeSpans.get(spanId);
+    if (span) {
+      span.endTime = Date.now();
+      span.duration = span.endTime - span.startTime;
+      
+      if (error) {
+        span.tags.error = true;
+        span.logs.push({
+          timestamp: Date.now(),
+          level: 'error',
+          message: error.message,
+          stack: error.stack
+        });
+      }
+
+      // Send to tracing system (e.g., Jaeger, Zipkin)
+      this.sendToTracingSystem(span);
+      this.activeSpans.delete(spanId);
+    }
+  }
+
+  async sendToTracingSystem(span) {
+    try {
+      await fetch('http://jaeger-collector:14268/api/traces', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ spans: [span] })
+      });
+    } catch (error) {
+      console.error('Failed to send trace:', error);
+    }
+  }
+}
+```
+
+## Conclusion
+
+Microservices architecture provides powerful benefits for scalable, distributed systems but comes with significant complexity. Success requires careful attention to service boundaries, communication patterns, data management, and operational concerns.
+
+Key takeaways:
+- Start with a monolith and decompose gradually
+- Invest heavily in automation and monitoring
+- Design for failure with circuit breakers and retry mechanisms
+- Use event-driven architecture for loose coupling
+- Implement proper service discovery and load balancing
+- Maintain strong observability across services
+
+The patterns and practices outlined here provide a foundation for building robust microservices systems that can scale with your business needs.
