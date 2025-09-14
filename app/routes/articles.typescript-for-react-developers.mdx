@@ -1,0 +1,453 @@
+---
+title: 'TypeScript for React Developers: A Practical Guide'
+abstract: Learn how to leverage TypeScript in React applications to catch bugs early, improve developer experience, and build more robust applications with better tooling support.
+date: '2024-01-20'
+banner: /static/typescript-react-banner.jpg
+featured: false
+---
+
+TypeScript has become an essential tool in the React ecosystem, providing static typing that helps catch errors during development and improves the overall developer experience. Let&apos;s explore how to effectively use TypeScript in React applications.
+
+## Why TypeScript with React?
+
+TypeScript brings several advantages to React development:
+
+- **Early Error Detection**: Catch type-related bugs during development
+- **Better IDE Support**: Enhanced autocomplete, refactoring, and navigation
+- **Self-Documenting Code**: Types serve as inline documentation
+- **Improved Team Collaboration**: Clear contracts between components
+
+## Setting Up TypeScript with React
+
+### Create React App with TypeScript
+
+The easiest way to start a new React project with TypeScript:
+
+```bash
+npx create-react-app my-app --template typescript
+```
+
+### Adding TypeScript to Existing Project
+
+For existing projects, install TypeScript and type definitions:
+
+```bash
+npm install --save-dev typescript @types/react @types/react-dom
+```
+
+Then rename your `.js` files to `.tsx` and add a `tsconfig.json`:
+
+```json
+{
+  &quot;compilerOptions&quot;: {
+    &quot;target&quot;: &quot;es5&quot;,
+    &quot;lib&quot;: [&quot;dom&quot;, &quot;dom.iterable&quot;, &quot;es6&quot;],
+    &quot;allowJs&quot;: true,
+    &quot;skipLibCheck&quot;: true,
+    &quot;esModuleInterop&quot;: true,
+    &quot;allowSyntheticDefaultImports&quot;: true,
+    &quot;strict&quot;: true,
+    &quot;forceConsistentCasingInFileNames&quot;: true,
+    &quot;moduleResolution&quot;: &quot;node&quot;,
+    &quot;resolveJsonModule&quot;: true,
+    &quot;isolatedModules&quot;: true,
+    &quot;noEmit&quot;: true,
+    &quot;jsx&quot;: &quot;react-jsx&quot;
+  },
+  &quot;include&quot;: [&quot;src&quot;]
+}
+```
+
+## Typing React Components
+
+### Function Components with Props
+
+```tsx
+interface ButtonProps {
+  children: React.ReactNode;
+  onClick: () => void;
+  variant?: &apos;primary&apos; | &apos;secondary&apos;;
+  disabled?: boolean;
+}
+
+const Button: React.FC<ButtonProps> = ({ 
+  children, 
+  onClick, 
+  variant = &apos;primary&apos;, 
+  disabled = false 
+}) => {
+  return (
+    <button 
+      className={`btn btn--${variant}`}
+      onClick={onClick}
+      disabled={disabled}
+    >
+      {children}
+    </button>
+  );
+};
+```
+
+### Using Generic Components
+
+```tsx
+interface ListProps<T> {
+  items: T[];
+  renderItem: (item: T) => React.ReactNode;
+  keyExtractor: (item: T) => string | number;
+}
+
+function List<T>({ items, renderItem, keyExtractor }: ListProps<T>) {
+  return (
+    <ul>
+      {items.map(item => (
+        <li key={keyExtractor(item)}>
+          {renderItem(item)}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// Usage
+const users = [{ id: 1, name: &apos;John&apos; }, { id: 2, name: &apos;Jane&apos; }];
+
+<List
+  items={users}
+  keyExtractor={user => user.id}
+  renderItem={user => <span>{user.name}</span>}
+/>
+```
+
+## Typing Hooks
+
+### useState with TypeScript
+
+```tsx
+// Type inference works for simple types
+const [count, setCount] = useState(0); // number
+const [name, setName] = useState(&apos;&apos;); // string
+
+// Explicit typing for complex types
+interface User {
+  id: number;
+  name: string;
+  email: string;
+}
+
+const [user, setUser] = useState<User | null>(null);
+
+// For arrays
+const [users, setUsers] = useState<User[]>([]);
+```
+
+### useEffect with Dependencies
+
+```tsx
+const [userId, setUserId] = useState<number | null>(null);
+const [user, setUser] = useState<User | null>(null);
+
+useEffect(() => {
+  if (userId) {
+    fetchUser(userId).then(setUser);
+  }
+}, [userId]);
+```
+
+### Custom Hooks with TypeScript
+
+```tsx
+interface UseApiResult<T> {
+  data: T | null;
+  loading: boolean;
+  error: Error | null;
+  refetch: () => void;
+}
+
+function useApi<T>(url: string): UseApiResult<T> {
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+
+  const fetchData = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(&apos;Failed to fetch&apos;);
+      }
+      const result = await response.json();
+      setData(result);
+    } catch (err) {
+      setError(err as Error);
+    } finally {
+      setLoading(false);
+    }
+  }, [url]);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
+  const refetch = useCallback(() => {
+    fetchData();
+  }, [fetchData]);
+
+  return { data, loading, error, refetch };
+}
+```
+
+## Event Handling
+
+### Typing Event Handlers
+
+```tsx
+interface FormProps {
+  onSubmit: (data: FormData) => void;
+}
+
+const ContactForm: React.FC<FormProps> = ({ onSubmit }) => {
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const formData = new FormData(e.currentTarget);
+    onSubmit(formData);
+  };
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    console.log(e.target.value);
+  };
+
+  const handleButtonClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+    console.log(&apos;Button clicked&apos;);
+  };
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input type=&quot;text&quot; name=&quot;name&quot; onChange={handleInputChange} />
+      <button type=&quot;submit&quot; onClick={handleButtonClick}>
+        Submit
+      </button>
+    </form>
+  );
+};
+```
+
+## Working with Context
+
+### Typed Context
+
+```tsx
+interface AuthContextType {
+  user: User | null;
+  login: (email: string, password: string) => Promise<void>;
+  logout: () => void;
+  loading: boolean;
+}
+
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const login = async (email: string, password: string) => {
+    setLoading(true);
+    try {
+      const user = await authenticate(email, password);
+      setUser(user);
+    } catch (error) {
+      throw error;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const logout = () => {
+    setUser(null);
+  };
+
+  const value = {
+    user,
+    login,
+    logout,
+    loading
+  };
+
+  return (
+    <AuthContext.Provider value={value}>
+      {children}
+    </AuthContext.Provider>
+  );
+};
+
+// Custom hook with proper typing
+export const useAuth = (): AuthContextType => {
+  const context = useContext(AuthContext);
+  if (context === undefined) {
+    throw new Error(&apos;useAuth must be used within an AuthProvider&apos;);
+  }
+  return context;
+};
+```
+
+## Advanced Patterns
+
+### Polymorphic Components
+
+```tsx
+type PolymorphicProps<E extends React.ElementType> = {
+  as?: E;
+  children: React.ReactNode;
+} & Omit<React.ComponentPropsWithoutRef<E>, &apos;as&apos; | &apos;children&apos;>;
+
+function Box<E extends React.ElementType = &apos;div&apos;>({
+  as,
+  children,
+  ...props
+}: PolymorphicProps<E>) {
+  const Component = as || &apos;div&apos;;
+  return <Component {...props}>{children}</Component>;
+}
+
+// Usage
+<Box>Default div</Box>
+<Box as=&quot;section&quot; className=&quot;container&quot;>Section element</Box>
+<Box as=&quot;button&quot; onClick={() => console.log(&apos;clicked&apos;)}>Button</Box>
+```
+
+### Discriminated Unions
+
+```tsx
+type ApiState<T> = 
+  | { status: &apos;idle&apos; }
+  | { status: &apos;loading&apos; }
+  | { status: &apos;success&apos;; data: T }
+  | { status: &apos;error&apos;; error: string };
+
+function DataComponent() {
+  const [state, setState] = useState<ApiState<User[]>>({ status: &apos;idle&apos; });
+
+  const renderContent = () => {
+    switch (state.status) {
+      case &apos;idle&apos;:
+        return <button onClick={fetchData}>Load Data</button>;
+      case &apos;loading&apos;:
+        return <div>Loading...</div>;
+      case &apos;success&apos;:
+        return <div>Users: {state.data.length}</div>; // TypeScript knows data exists
+      case &apos;error&apos;:
+        return <div>Error: {state.error}</div>; // TypeScript knows error exists
+    }
+  };
+
+  return <div>{renderContent()}</div>;
+}
+```
+
+## Best Practices
+
+### 1. Start with Strict Mode
+
+Enable strict mode in your `tsconfig.json` for better type safety:
+
+```json
+{
+  &quot;compilerOptions&quot;: {
+    &quot;strict&quot;: true,
+    &quot;noUnusedLocals&quot;: true,
+    &quot;noUnusedParameters&quot;: true,
+    &quot;exactOptionalPropertyTypes&quot;: true
+  }
+}
+```
+
+### 2. Use Interface over Type for Objects
+
+```tsx
+// Prefer interface for object shapes
+interface UserProps {
+  name: string;
+  age: number;
+}
+
+// Use type for unions, primitives, or computed types
+type Status = &apos;loading&apos; | &apos;success&apos; | &apos;error&apos;;
+type UserKeys = keyof UserProps;
+```
+
+### 3. Avoid `any` - Use Unknown Instead
+
+```tsx
+// Avoid
+const processData = (data: any) => {
+  return data.something; // No type safety
+};
+
+// Better
+const processData = (data: unknown) => {
+  if (typeof data === &apos;object&apos; && data !== null && &apos;something&apos; in data) {
+    return (data as { something: any }).something;
+  }
+  return null;
+};
+```
+
+### 4. Use Type Guards
+
+```tsx
+interface User {
+  id: number;
+  name: string;
+}
+
+function isUser(obj: unknown): obj is User {
+  return (
+    typeof obj === &apos;object&apos; &&
+    obj !== null &&
+    &apos;id&apos; in obj &&
+    &apos;name&apos; in obj &&
+    typeof (obj as User).id === &apos;number&apos; &&
+    typeof (obj as User).name === &apos;string&apos;
+  );
+}
+
+// Usage
+const processUserData = (data: unknown) => {
+  if (isUser(data)) {
+    // TypeScript knows data is User here
+    console.log(data.name);
+  }
+};
+```
+
+## Common Pitfalls and Solutions
+
+### 1. Ref Typing
+
+```tsx
+// For DOM elements
+const inputRef = useRef<HTMLInputElement>(null);
+
+// For component instances
+const componentRef = useRef<ComponentType>(null);
+
+// For mutable values
+const countRef = useRef<number>(0);
+```
+
+### 2. Children Prop
+
+```tsx
+// Most flexible approach
+interface Props {
+  children: React.ReactNode;
+}
+
+// For specific requirements
+interface StrictProps {
+  children: React.ReactElement<ComponentProps>;
+}
+```
+
+TypeScript with React significantly improves the development experience by providing type safety, better tooling, and self-documenting code. While there&apos;s a learning curve, the benefits far outweigh the initial investment in learning the patterns and best practices.

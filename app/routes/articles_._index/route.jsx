@@ -14,7 +14,7 @@ export function meta() {
   return baseMeta({
     title: 'Articles',
     description:
-      'A collection of technical design and development articles. May contain incoherent ramblings.',
+      'Technical articles and insights on modern web development, JavaScript, React, Node.js, and full-stack development best practices by Abushaid Islam Shaid.',
   });
 }
 

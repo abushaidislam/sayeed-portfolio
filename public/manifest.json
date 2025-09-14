@@ -1,7 +1,12 @@
 {
-  "short_name": "Hamish Williams",
-  "name": "Design Portfolio of Hamish Williams",
+  "short_name": "Sayeed Portfolio",
+  "name": "Design Portfolio of Abushaid Islam Shaid (Sayeed)",
   "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    },
     {
       "src": "shortcut.png",
       "sizes": "64x64",

@@ -1,0 +1,550 @@
+---
+title: 'Building Progressive Web Apps with Modern JavaScript'
+abstract: Learn how to build fast, reliable, and engaging Progressive Web Apps using modern JavaScript features, service workers, and web APIs that provide native app-like experiences.
+date: '2024-02-10'
+banner: /static/progressive-web-apps-banner.jpg
+featured: false
+---
+
+Progressive Web Apps (PWAs) combine the best of web and mobile apps, offering fast, reliable, and engaging experiences that work offline and can be installed on devices. Let&apos;s explore how to build PWAs with modern JavaScript.
+
+## What Makes a Progressive Web App?
+
+PWAs are characterized by three key principles:
+
+1. **Reliable**: Load instantly and work offline
+2. **Fast**: Respond quickly to user interactions
+3. **Engaging**: Feel like native apps with immersive experiences
+
+### Core Technologies
+
+- **Service Workers**: Enable offline functionality and background sync
+- **Web App Manifest**: Make apps installable
+- **HTTPS**: Required for security and service worker functionality
+
+## Setting Up the Foundation
+
+### Web App Manifest
+
+```json
+{
+  &quot;name&quot;: &quot;Sayeed Portfolio PWA&quot;,
+  &quot;short_name&quot;: &quot;Sayeed PWA&quot;,
+  &quot;description&quot;: &quot;Abushaid Islam Shaid&apos;s Progressive Web App Portfolio&quot;,
+  &quot;start_url&quot;: &quot;/&quot;,
+  &quot;display&quot;: &quot;standalone&quot;,
+  &quot;background_color&quot;: &quot;#ffffff&quot;,
+  &quot;theme_color&quot;: &quot;#000000&quot;,
+  &quot;orientation&quot;: &quot;portrait-primary&quot;,
+  &quot;icons&quot;: [
+    {
+      &quot;src&quot;: &quot;/icons/icon-192.png&quot;,
+      &quot;sizes&quot;: &quot;192x192&quot;,
+      &quot;type&quot;: &quot;image/png&quot;
+    },
+    {
+      &quot;src&quot;: &quot;/icons/icon-512.png&quot;,
+      &quot;sizes&quot;: &quot;512x512&quot;,
+      &quot;type&quot;: &quot;image/png&quot;
+    }
+  ]
+}
+```
+
+### Service Worker Registration
+
+```javascript
+// Register service worker
+if (&apos;serviceWorker&apos; in navigator) {
+  window.addEventListener(&apos;load&apos;, async () => {
+    try {
+      const registration = await navigator.serviceWorker.register(&apos;/sw.js&apos;);
+      console.log(&apos;SW registered:&apos;, registration);
+    } catch (error) {
+      console.log(&apos;SW registration failed:&apos;, error);
+    }
+  });
+}
+```
+
+## Service Worker Implementation
+
+### Basic Service Worker Structure
+
+```javascript
+// sw.js
+const CACHE_NAME = &apos;sayeed-pwa-v1&apos;;
+const urlsToCache = [
+  &apos;/&apos;,
+  &apos;/css/style.css&apos;,
+  &apos;/js/app.js&apos;,
+  &apos;/offline.html&apos;
+];
+
+// Install event
+self.addEventListener(&apos;install&apos;, event => {
+  event.waitUntil(
+    caches.open(CACHE_NAME)
+      .then(cache => {
+        console.log(&apos;Opened cache&apos;);
+        return cache.addAll(urlsToCache);
+      })
+  );
+});
+
+// Activate event
+self.addEventListener(&apos;activate&apos;, event => {
+  event.waitUntil(
+    caches.keys().then(cacheNames => {
+      return Promise.all(
+        cacheNames.map(cacheName => {
+          if (cacheName !== CACHE_NAME) {
+            console.log(&apos;Deleting old cache:&apos;, cacheName);
+            return caches.delete(cacheName);
+          }
+        })
+      );
+    })
+  );
+});
+
+// Fetch event
+self.addEventListener(&apos;fetch&apos;, event => {
+  event.respondWith(
+    caches.match(event.request)
+      .then(response => {
+        // Return cached version or fetch from network
+        if (response) {
+          return response;
+        }
+        return fetch(event.request);
+      }
+    )
+  );
+});
+```
+
+### Advanced Caching Strategies
+
+```javascript
+// Cache strategies for different types of resources
+self.addEventListener(&apos;fetch&apos;, event => {
+  const { request } = event;
+  const url = new URL(request.url);
+
+  // Handle API requests
+  if (url.pathname.startsWith(&apos;/api/&apos;)) {
+    event.respondWith(networkFirst(request));
+    return;
+  }
+
+  // Handle images
+  if (request.destination === &apos;image&apos;) {
+    event.respondWith(cacheFirst(request));
+    return;
+  }
+
+  // Handle navigation requests
+  if (request.mode === &apos;navigate&apos;) {
+    event.respondWith(navigationHandler(request));
+    return;
+  }
+
+  // Default: cache first for other resources
+  event.respondWith(cacheFirst(request));
+});
+
+// Network first strategy (good for API calls)
+async function networkFirst(request) {
+  try {
+    const networkResponse = await fetch(request);
+    const cache = await caches.open(CACHE_NAME);
+    cache.put(request, networkResponse.clone());
+    return networkResponse;
+  } catch (error) {
+    const cachedResponse = await caches.match(request);
+    return cachedResponse || new Response(&apos;Offline&apos;, { status: 503 });
+  }
+}
+
+// Cache first strategy (good for static assets)
+async function cacheFirst(request) {
+  const cachedResponse = await caches.match(request);
+  if (cachedResponse) {
+    return cachedResponse;
+  }
+
+  try {
+    const networkResponse = await fetch(request);
+    const cache = await caches.open(CACHE_NAME);
+    cache.put(request, networkResponse.clone());
+    return networkResponse;
+  } catch (error) {
+    return new Response(&apos;Network error&apos;, { status: 503 });
+  }
+}
+
+// Navigation handler with offline fallback
+async function navigationHandler(request) {
+  try {
+    return await fetch(request);
+  } catch (error) {
+    return caches.match(&apos;/offline.html&apos;);
+  }
+}
+```
+
+## Offline Functionality
+
+### Background Sync
+
+```javascript
+// Register background sync
+self.addEventListener(&apos;sync&apos;, event => {
+  if (event.tag === &apos;background-sync&apos;) {
+    event.waitUntil(syncData());
+  }
+});
+
+async function syncData() {
+  try {
+    // Sync pending data when back online
+    const pendingData = await getFromIndexedDB(&apos;pendingSync&apos;);
+    
+    for (const item of pendingData) {
+      await fetch(&apos;/api/sync&apos;, {
+        method: &apos;POST&apos;,
+        body: JSON.stringify(item),
+        headers: { &apos;Content-Type&apos;: &apos;application/json&apos; }
+      });
+    }
+    
+    await clearFromIndexedDB(&apos;pendingSync&apos;);
+  } catch (error) {
+    console.error(&apos;Background sync failed:&apos;, error);
+  }
+}
+
+// Client-side: Register for background sync
+if (&apos;serviceWorker&apos; in navigator && &apos;sync&apos; in window.ServiceWorkerRegistration.prototype) {
+  navigator.serviceWorker.ready.then(registration => {
+    return registration.sync.register(&apos;background-sync&apos;);
+  });
+}
+```
+
+### IndexedDB for Offline Storage
+
+```javascript
+class OfflineStorage {
+  constructor() {
+    this.dbName = &apos;sayeedPWA&apos;;
+    this.version = 1;
+    this.db = null;
+  }
+
+  async init() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(this.dbName, this.version);
+
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        this.db = request.result;
+        resolve();
+      };
+
+      request.onupgradeneeded = (event) => {
+        const db = event.target.result;
+        
+        // Create object stores
+        if (!db.objectStoreNames.contains(&apos;articles&apos;)) {
+          const articlesStore = db.createObjectStore(&apos;articles&apos;, { keyPath: &apos;id&apos; });
+          articlesStore.createIndex(&apos;title&apos;, &apos;title&apos;, { unique: false });
+        }
+
+        if (!db.objectStoreNames.contains(&apos;pendingSync&apos;)) {
+          db.createObjectStore(&apos;pendingSync&apos;, { keyPath: &apos;id&apos;, autoIncrement: true });
+        }
+      };
+    });
+  }
+
+  async saveArticle(article) {
+    const transaction = this.db.transaction([&apos;articles&apos;], &apos;readwrite&apos;);
+    const store = transaction.objectStore(&apos;articles&apos;);
+    return store.put(article);
+  }
+
+  async getArticles() {
+    const transaction = this.db.transaction([&apos;articles&apos;], &apos;readonly&apos;);
+    const store = transaction.objectStore(&apos;articles&apos;);
+    
+    return new Promise((resolve, reject) => {
+      const request = store.getAll();
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  async addToPendingSync(data) {
+    const transaction = this.db.transaction([&apos;pendingSync&apos;], &apos;readwrite&apos;);
+    const store = transaction.objectStore(&apos;pendingSync&apos;);
+    return store.add({ data, timestamp: Date.now() });
+  }
+}
+
+// Usage
+const storage = new OfflineStorage();
+await storage.init();
+```
+
+## Push Notifications
+
+### Setting Up Push Notifications
+
+```javascript
+// Request notification permission
+async function requestNotificationPermission() {
+  if (!(&apos;Notification&apos; in window)) {
+    console.log(&apos;This browser does not support notifications&apos;);
+    return false;
+  }
+
+  if (Notification.permission === &apos;granted&apos;) {
+    return true;
+  }
+
+  if (Notification.permission !== &apos;denied&apos;) {
+    const permission = await Notification.requestPermission();
+    return permission === &apos;granted&apos;;
+  }
+
+  return false;
+}
+
+// Subscribe to push notifications
+async function subscribeUserToPush() {
+  const registration = await navigator.serviceWorker.ready;
+  
+  const subscription = await registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToUint8Array(PUBLIC_VAPID_KEY)
+  });
+
+  // Send subscription to server
+  await fetch(&apos;/api/subscribe&apos;, {
+    method: &apos;POST&apos;,
+    body: JSON.stringify(subscription),
+    headers: { &apos;Content-Type&apos;: &apos;application/json&apos; }
+  });
+
+  return subscription;
+}
+
+// Handle push events in service worker
+self.addEventListener(&apos;push&apos;, event => {
+  const data = event.data ? event.data.json() : {};
+  
+  const options = {
+    body: data.body || &apos;New update available!&apos;,
+    icon: &apos;/icons/icon-192.png&apos;,
+    badge: &apos;/icons/badge.png&apos;,
+    data: data.url || &apos;/&apos;,
+    actions: [
+      { action: &apos;open&apos;, title: &apos;Open App&apos; },
+      { action: &apos;close&apos;, title: &apos;Close&apos; }
+    ]
+  };
+
+  event.waitUntil(
+    self.registration.showNotification(data.title || &apos;Sayeed PWA&apos;, options)
+  );
+});
+
+// Handle notification clicks
+self.addEventListener(&apos;notificationclick&apos;, event => {
+  event.notification.close();
+
+  if (event.action === &apos;open&apos; || !event.action) {
+    event.waitUntil(
+      clients.openWindow(event.notification.data || &apos;/&apos;)
+    );
+  }
+});
+```
+
+## App Installation
+
+### Install Prompt Handling
+
+```javascript
+class InstallManager {
+  constructor() {
+    this.deferredPrompt = null;
+    this.setupInstallPrompt();
+  }
+
+  setupInstallPrompt() {
+    window.addEventListener(&apos;beforeinstallprompt&apos;, (e) => {
+      // Prevent the mini-infobar from appearing
+      e.preventDefault();
+      this.deferredPrompt = e;
+      this.showInstallButton();
+    });
+
+    window.addEventListener(&apos;appinstalled&apos;, () => {
+      console.log(&apos;PWA was installed&apos;);
+      this.hideInstallButton();
+      this.deferredPrompt = null;
+    });
+  }
+
+  async promptInstall() {
+    if (!this.deferredPrompt) return;
+
+    this.deferredPrompt.prompt();
+    const { outcome } = await this.deferredPrompt.userChoice;
+    
+    if (outcome === &apos;accepted&apos;) {
+      console.log(&apos;User accepted the install prompt&apos;);
+    } else {
+      console.log(&apos;User dismissed the install prompt&apos;);
+    }
+
+    this.deferredPrompt = null;
+  }
+
+  showInstallButton() {
+    const installButton = document.getElementById(&apos;installButton&apos;);
+    if (installButton) {
+      installButton.style.display = &apos;block&apos;;
+      installButton.addEventListener(&apos;click&apos;, () => this.promptInstall());
+    }
+  }
+
+  hideInstallButton() {
+    const installButton = document.getElementById(&apos;installButton&apos;);
+    if (installButton) {
+      installButton.style.display = &apos;none&apos;;
+    }
+  }
+}
+
+new InstallManager();
+```
+
+## Performance Optimization for PWAs
+
+### App Shell Architecture
+
+```javascript
+// Implement app shell pattern
+const APP_SHELL_CACHE = &apos;app-shell-v1&apos;;
+const APP_SHELL_FILES = [
+  &apos;/&apos;,
+  &apos;/shell.html&apos;,
+  &apos;/css/shell.css&apos;,
+  &apos;/js/shell.js&apos;,
+  &apos;/manifest.json&apos;
+];
+
+self.addEventListener(&apos;install&apos;, event => {
+  event.waitUntil(
+    caches.open(APP_SHELL_CACHE)
+      .then(cache => cache.addAll(APP_SHELL_FILES))
+      .then(() => self.skipWaiting())
+  );
+});
+
+// Serve app shell for navigation requests
+self.addEventListener(&apos;fetch&apos;, event => {
+  if (event.request.mode === &apos;navigate&apos;) {
+    event.respondWith(
+      caches.match(&apos;/shell.html&apos;)
+        .then(response => response || fetch(event.request))
+    );
+  }
+});
+```
+
+### Lazy Loading Components
+
+```javascript
+// Lazy load PWA features
+const features = {
+  camera: () => import(&apos;./features/camera.js&apos;),
+  geolocation: () => import(&apos;./features/geolocation.js&apos;),
+  notifications: () => import(&apos;./features/notifications.js&apos;)
+};
+
+async function loadFeature(name) {
+  try {
+    const module = await features[name]();
+    return module.default;
+  } catch (error) {
+    console.error(`Failed to load feature: ${name}`, error);
+    return null;
+  }
+}
+
+// Load features on demand
+document.addEventListener(&apos;click&apos;, async (e) => {
+  if (e.target.dataset.feature) {
+    const feature = await loadFeature(e.target.dataset.feature);
+    if (feature) {
+      feature.init();
+    }
+  }
+});
+```
+
+## Testing and Debugging PWAs
+
+### PWA Audit with Lighthouse
+
+```javascript
+// Add PWA-specific performance tracking
+class PWAMetrics {
+  constructor() {
+    this.metrics = {};
+    this.trackInstallability();
+    this.trackOfflineUsage();
+  }
+
+  trackInstallability() {
+    if (window.matchMedia(&apos;(display-mode: standalone)&apos;).matches) {
+      this.metrics.displayMode = &apos;standalone&apos;;
+    } else {
+      this.metrics.displayMode = &apos;browser&apos;;
+    }
+  }
+
+  trackOfflineUsage() {
+    window.addEventListener(&apos;online&apos;, () => {
+      this.metrics.connectionEvents = this.metrics.connectionEvents || [];
+      this.metrics.connectionEvents.push({ type: &apos;online&apos;, timestamp: Date.now() });
+    });
+
+    window.addEventListener(&apos;offline&apos;, () => {
+      this.metrics.connectionEvents = this.metrics.connectionEvents || [];
+      this.metrics.connectionEvents.push({ type: &apos;offline&apos;, timestamp: Date.now() });
+    });
+  }
+
+  sendMetrics() {
+    if (navigator.onLine) {
+      fetch(&apos;/api/pwa-metrics&apos;, {
+        method: &apos;POST&apos;,
+        body: JSON.stringify(this.metrics),
+        headers: { &apos;Content-Type&apos;: &apos;application/json&apos; }
+      });
+    }
+  }
+}
+
+new PWAMetrics();
+```
+
+Progressive Web Apps represent the future of web development, offering native app-like experiences while maintaining the accessibility and reach of the web. By implementing these techniques, you can create fast, reliable, and engaging applications that work seamlessly across all devices and network conditions.
+
+Remember to test your PWA thoroughly across different devices and network conditions, and use tools like Lighthouse to ensure you&apos;re meeting PWA standards and best practices.

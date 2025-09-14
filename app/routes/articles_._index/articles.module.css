@@ -136,6 +136,13 @@
       position: relative;
       height: auto;
       top: 0;
+      margin-bottom: var(--space2XL);
+    }
+
+    @media (--mediaMobile), (--mediaMobileLS) {
+      position: relative;
+      height: auto;
+      margin-bottom: var(--spaceXL);
     }
   }
 

@@ -1,0 +1,701 @@
+---
+title: 'React Hooks Deep Dive: Advanced Patterns and Best Practices'
+abstract: Master advanced React Hooks patterns and learn how to build custom hooks that solve real-world problems. From performance optimization to state management, discover the full potential of React Hooks.
+date: '2024-03-05'
+banner: /static/react-hooks-banner.jpg
+---
+
+## Introduction to Advanced Hooks
+
+React Hooks revolutionized how we write React components, enabling us to use state and lifecycle features in functional components. While most developers are familiar with basic hooks like `useState` and `useEffect`, the real power lies in understanding advanced patterns and creating custom hooks.
+
+In this deep dive, I&apos;ll explore advanced hooks patterns that I&apos;ve found invaluable in building robust React applications.
+
+## Advanced Built-in Hooks
+
+### useReducer for Complex State
+
+When `useState` becomes unwieldy, `useReducer` provides a more predictable state management pattern:
+
+```jsx
+const initialState = {
+  loading: false,
+  data: null,
+  error: null
+};
+
+function dataReducer(state, action) {
+  switch (action.type) {
+    case 'FETCH_START':
+      return { ...state, loading: true, error: null };
+    case 'FETCH_SUCCESS':
+      return { ...state, loading: false, data: action.payload };
+    case 'FETCH_ERROR':
+      return { ...state, loading: false, error: action.payload };
+    case 'RESET':
+      return initialState;
+    default:
+      throw new Error(`Unhandled action type: ${action.type}`);
+  }
+}
+
+function DataComponent() {
+  const [state, dispatch] = useReducer(dataReducer, initialState);
+
+  const fetchData = async (url) => {
+    dispatch({ type: 'FETCH_START' });
+    try {
+      const response = await fetch(url);
+      const data = await response.json();
+      dispatch({ type: 'FETCH_SUCCESS', payload: data });
+    } catch (error) {
+      dispatch({ type: 'FETCH_ERROR', payload: error.message });
+    }
+  };
+
+  return (
+    <div>
+      {state.loading && <div>Loading...</div>}
+      {state.error && <div>Error: {state.error}</div>}
+      {state.data && <div>Data: {JSON.stringify(state.data)}</div>}
+      <button onClick={() => fetchData('/api/data')}>Fetch Data</button>
+      <button onClick={() => dispatch({ type: 'RESET' })}>Reset</button>
+    </div>
+  );
+}
+```
+
+### useCallback and useMemo for Performance
+
+Strategic memoization can prevent unnecessary re-renders and expensive calculations:
+
+```jsx
+function OptimizedComponent({ items, filter, onItemClick }) {
+  // Memoize expensive filtering operation
+  const filteredItems = useMemo(() => {
+    console.log('Filtering items...'); // This should only log when items or filter change
+    return items.filter(item => 
+      item.name.toLowerCase().includes(filter.toLowerCase())
+    );
+  }, [items, filter]);
+
+  // Memoize callback to prevent child re-renders
+  const handleItemClick = useCallback((id) => {
+    onItemClick(id);
+  }, [onItemClick]);
+
+  return (
+    <div>
+      {filteredItems.map(item => (
+        <ItemComponent 
+          key={item.id} 
+          item={item} 
+          onClick={handleItemClick}
+        />
+      ))}
+    </div>
+  );
+}
+
+// Child component wrapped in React.memo
+const ItemComponent = React.memo(({ item, onClick }) => {
+  console.log(`Rendering item ${item.id}`); // Should only log when item changes
+  
+  return (
+    <div onClick={() => onClick(item.id)}>
+      {item.name}
+    </div>
+  );
+});
+```
+
+### useRef for More Than DOM Access
+
+`useRef` can store mutable values that persist across renders without causing re-renders:
+
+```jsx
+function Timer() {
+  const [time, setTime] = useState(0);
+  const intervalRef = useRef(null);
+  const prevTimeRef = useRef(0);
+
+  useEffect(() => {
+    prevTimeRef.current = time;
+  });
+
+  const start = () => {
+    if (!intervalRef.current) {
+      intervalRef.current = setInterval(() => {
+        setTime(prevTime => prevTime + 1);
+      }, 1000);
+    }
+  };
+
+  const stop = () => {
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+  };
+
+  const timeDifference = time - prevTimeRef.current;
+
+  return (
+    <div>
+      <div>Current time: {time}</div>
+      <div>Time difference: {timeDifference}</div>
+      <button onClick={start}>Start</button>
+      <button onClick={stop}>Stop</button>
+    </div>
+  );
+}
+```
+
+## Custom Hooks Patterns
+
+### Data Fetching Hook
+
+```jsx
+function useApi(url, options = {}) {
+  const [state, dispatch] = useReducer(
+    (state, action) => {
+      switch (action.type) {
+        case 'LOADING':
+          return { ...state, loading: true, error: null };
+        case 'SUCCESS':
+          return { loading: false, data: action.payload, error: null };
+        case 'ERROR':
+          return { loading: false, data: null, error: action.payload };
+        default:
+          return state;
+      }
+    },
+    { loading: false, data: null, error: null }
+  );
+
+  const execute = useCallback(async (customUrl = url) => {
+    dispatch({ type: 'LOADING' });
+    
+    try {
+      const response = await fetch(customUrl, {
+        headers: { 'Content-Type': 'application/json' },
+        ...options
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      dispatch({ type: 'SUCCESS', payload: data });
+      return data;
+    } catch (error) {
+      dispatch({ type: 'ERROR', payload: error.message });
+      throw error;
+    }
+  }, [url, options]);
+
+  useEffect(() => {
+    if (url && options.immediate !== false) {
+      execute();
+    }
+  }, [execute, url]);
+
+  return { ...state, execute };
+}
+
+// Usage
+function UserProfile({ userId }) {
+  const { data: user, loading, error } = useApi(`/api/users/${userId}`);
+  const { execute: updateUser } = useApi(null, { 
+    method: 'PUT',
+    immediate: false 
+  });
+
+  const handleUpdate = async (userData) => {
+    try {
+      await updateUser(`/api/users/${userId}`, {
+        body: JSON.stringify(userData)
+      });
+      // Handle success
+    } catch (error) {
+      // Handle error
+    }
+  };
+
+  if (loading) return <div>Loading...</div>;
+  if (error) return <div>Error: {error}</div>;
+  
+  return <div>{user?.name}</div>;
+}
+```
+
+### Local Storage Hook
+
+```jsx
+function useLocalStorage(key, initialValue) {
+  // Get from local storage then parse stored json or return initialValue
+  const [storedValue, setStoredValue] = useState(() => {
+    try {
+      const item = window.localStorage.getItem(key);
+      return item ? JSON.parse(item) : initialValue;
+    } catch (error) {
+      console.error(`Error reading localStorage key "${key}":`, error);
+      return initialValue;
+    }
+  });
+
+  // Return a wrapped version of useState's setter function that persists the new value to localStorage
+  const setValue = useCallback((value) => {
+    try {
+      // Allow value to be a function so we have the same API as useState
+      const valueToStore = value instanceof Function ? value(storedValue) : value;
+      setStoredValue(valueToStore);
+      window.localStorage.setItem(key, JSON.stringify(valueToStore));
+    } catch (error) {
+      console.error(`Error setting localStorage key "${key}":`, error);
+    }
+  }, [key, storedValue]);
+
+  // Listen for changes to this key in other tabs/windows
+  useEffect(() => {
+    const handleStorageChange = (e) => {
+      if (e.key === key && e.newValue !== null) {
+        try {
+          setStoredValue(JSON.parse(e.newValue));
+        } catch (error) {
+          console.error(`Error parsing localStorage key "${key}":`, error);
+        }
+      }
+    };
+
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
+  }, [key]);
+
+  return [storedValue, setValue];
+}
+
+// Usage
+function Settings() {
+  const [theme, setTheme] = useLocalStorage('theme', 'light');
+  const [preferences, setPreferences] = useLocalStorage('preferences', {
+    notifications: true,
+    language: 'en'
+  });
+
+  return (
+    <div>
+      <button onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}>
+        Current theme: {theme}
+      </button>
+      <button 
+        onClick={() => setPreferences(prev => ({
+          ...prev,
+          notifications: !prev.notifications
+        }))}
+      >
+        Notifications: {preferences.notifications ? 'On' : 'Off'}
+      </button>
+    </div>
+  );
+}
+```
+
+### Debounced Value Hook
+
+```jsx
+function useDebounce(value, delay) {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedValue(value);
+    }, delay);
+
+    return () => {
+      clearTimeout(handler);
+    };
+  }, [value, delay]);
+
+  return debouncedValue;
+}
+
+// Advanced version with immediate execution option
+function useAdvancedDebounce(value, delay, immediate = false) {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+  const timeoutRef = useRef(null);
+  const immediateRef = useRef(immediate);
+
+  useEffect(() => {
+    if (immediateRef.current) {
+      setDebouncedValue(value);
+      immediateRef.current = false;
+    } else {
+      timeoutRef.current = setTimeout(() => {
+        setDebouncedValue(value);
+      }, delay);
+    }
+
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
+    };
+  }, [value, delay]);
+
+  return debouncedValue;
+}
+
+// Usage
+function SearchComponent() {
+  const [searchTerm, setSearchTerm] = useState('');
+  const debouncedSearchTerm = useDebounce(searchTerm, 300);
+
+  const { data: results, loading } = useApi(
+    debouncedSearchTerm ? `/api/search?q=${debouncedSearchTerm}` : null
+  );
+
+  return (
+    <div>
+      <input 
+        value={searchTerm}
+        onChange={(e) => setSearchTerm(e.target.value)}
+        placeholder="Search..."
+      />
+      {loading && <div>Searching...</div>}
+      {results && (
+        <ul>
+          {results.map(result => (
+            <li key={result.id}>{result.title}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+```
+
+## Advanced Patterns
+
+### Compound Hooks Pattern
+
+```jsx
+// Custom hook that returns multiple related hooks
+function useFormWithValidation(initialValues = {}, validationRules = {}) {
+  const [values, setValues] = useState(initialValues);
+  const [errors, setErrors] = useState({});
+  const [touched, setTouched] = useState({});
+
+  const validate = useCallback((fieldName, value) => {
+    const rule = validationRules[fieldName];
+    if (!rule) return null;
+
+    if (rule.required && !value) {
+      return 'This field is required';
+    }
+
+    if (rule.minLength && value.length < rule.minLength) {
+      return `Minimum length is ${rule.minLength}`;
+    }
+
+    if (rule.pattern && !rule.pattern.test(value)) {
+      return rule.message || 'Invalid format';
+    }
+
+    return null;
+  }, [validationRules]);
+
+  const setValue = useCallback((name, value) => {
+    setValues(prev => ({ ...prev, [name]: value }));
+    
+    // Validate on change if field has been touched
+    if (touched[name]) {
+      const error = validate(name, value);
+      setErrors(prev => ({ ...prev, [name]: error }));
+    }
+  }, [touched, validate]);
+
+  const setFieldTouched = useCallback((name) => {
+    setTouched(prev => ({ ...prev, [name]: true }));
+    
+    // Validate when field is touched
+    const error = validate(name, values[name]);
+    setErrors(prev => ({ ...prev, [name]: error }));
+  }, [values, validate]);
+
+  const resetForm = useCallback(() => {
+    setValues(initialValues);
+    setErrors({});
+    setTouched({});
+  }, [initialValues]);
+
+  const isValid = useMemo(() => {
+    return Object.values(errors).every(error => !error) &&
+           Object.keys(validationRules).every(field => touched[field]);
+  }, [errors, touched, validationRules]);
+
+  return {
+    values,
+    errors,
+    touched,
+    setValue,
+    setFieldTouched,
+    resetForm,
+    isValid
+  };
+}
+
+// Usage
+function ContactForm() {
+  const validationRules = {
+    email: {
+      required: true,
+      pattern: /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
+      message: 'Please enter a valid email'
+    },
+    message: {
+      required: true,
+      minLength: 10
+    }
+  };
+
+  const {
+    values,
+    errors,
+    touched,
+    setValue,
+    setFieldTouched,
+    resetForm,
+    isValid
+  } = useFormWithValidation({ email: '', message: '' }, validationRules);
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (isValid) {
+      console.log('Form submitted:', values);
+      resetForm();
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input
+        type="email"
+        value={values.email}
+        onChange={(e) => setValue('email', e.target.value)}
+        onBlur={() => setFieldTouched('email')}
+        placeholder="Email"
+      />
+      {touched.email && errors.email && <span>{errors.email}</span>}
+
+      <textarea
+        value={values.message}
+        onChange={(e) => setValue('message', e.target.value)}
+        onBlur={() => setFieldTouched('message')}
+        placeholder="Message"
+      />
+      {touched.message && errors.message && <span>{errors.message}</span>}
+
+      <button type="submit" disabled={!isValid}>
+        Send Message
+      </button>
+    </form>
+  );
+}
+```
+
+### Hook Composition
+
+```jsx
+// Composing multiple hooks to create more complex behavior
+function useAsyncOperation() {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const loadingRef = useRef(false);
+
+  const execute = useCallback(async (asyncFunction) => {
+    if (loadingRef.current) return;
+
+    setLoading(true);
+    setError(null);
+    loadingRef.current = true;
+
+    try {
+      const result = await asyncFunction();
+      return result;
+    } catch (err) {
+      setError(err.message);
+      throw err;
+    } finally {
+      setLoading(false);
+      loadingRef.current = false;
+    }
+  }, []);
+
+  return { loading, error, execute };
+}
+
+function useOptimisticUpdate(initialData, updateFunction) {
+  const [data, setData] = useState(initialData);
+  const [originalData, setOriginalData] = useState(initialData);
+  const { loading, error, execute } = useAsyncOperation();
+
+  const optimisticUpdate = useCallback(async (newData, apiCall) => {
+    // Store current data for rollback
+    setOriginalData(data);
+    
+    // Optimistically update UI
+    setData(newData);
+
+    try {
+      await execute(apiCall);
+      // Success - keep the optimistic update
+    } catch (error) {
+      // Rollback on error
+      setData(originalData);
+      throw error;
+    }
+  }, [data, originalData, execute]);
+
+  return {
+    data,
+    loading,
+    error,
+    optimisticUpdate
+  };
+}
+
+// Usage
+function TodoItem({ todo, onUpdate }) {
+  const { data, loading, error, optimisticUpdate } = useOptimisticUpdate(
+    todo,
+    updateTodo
+  );
+
+  const handleToggle = () => {
+    const updatedTodo = { ...data, completed: !data.completed };
+    
+    optimisticUpdate(
+      updatedTodo,
+      () => onUpdate(data.id, updatedTodo)
+    );
+  };
+
+  return (
+    <div>
+      <input
+        type="checkbox"
+        checked={data.completed}
+        onChange={handleToggle}
+        disabled={loading}
+      />
+      <span style={{ opacity: loading ? 0.6 : 1 }}>
+        {data.title}
+      </span>
+      {error && <span>Error: {error}</span>}
+    </div>
+  );
+}
+```
+
+## Testing Custom Hooks
+
+```jsx
+import { renderHook, act } from '@testing-library/react';
+import { useLocalStorage } from './useLocalStorage';
+
+describe('useLocalStorage', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('should return initial value when localStorage is empty', () => {
+    const { result } = renderHook(() => useLocalStorage('test', 'initial'));
+    expect(result.current[0]).toBe('initial');
+  });
+
+  it('should update localStorage when value changes', () => {
+    const { result } = renderHook(() => useLocalStorage('test', 'initial'));
+    
+    act(() => {
+      result.current[1]('updated');
+    });
+
+    expect(result.current[0]).toBe('updated');
+    expect(localStorage.getItem('test')).toBe('"updated"');
+  });
+
+  it('should handle function updates', () => {
+    const { result } = renderHook(() => useLocalStorage('counter', 0));
+    
+    act(() => {
+      result.current[1](prev => prev + 1);
+    });
+
+    expect(result.current[0]).toBe(1);
+  });
+});
+```
+
+## Best Practices and Common Pitfalls
+
+### Dependency Array Guidelines
+
+```jsx
+// ❌ Missing dependencies
+useEffect(() => {
+  fetchData(userId);
+}, []); // userId should be in dependencies
+
+// ❌ Unnecessary dependencies
+useEffect(() => {
+  const timer = setInterval(callback, 1000);
+  return () => clearInterval(timer);
+}, [callback]); // callback changes every render
+
+// ✅ Proper dependencies with useCallback
+const callback = useCallback(() => {
+  // callback logic
+}, [/* dependencies of callback */]);
+
+useEffect(() => {
+  const timer = setInterval(callback, 1000);
+  return () => clearInterval(timer);
+}, [callback]);
+```
+
+### Avoiding Infinite Loops
+
+```jsx
+// ❌ This will cause infinite re-renders
+function BadComponent() {
+  const [data, setData] = useState([]);
+  
+  useEffect(() => {
+    setData(data.concat(newItem)); // data is always changing
+  }, [data]);
+}
+
+// ✅ Use functional updates instead
+function GoodComponent() {
+  const [data, setData] = useState([]);
+  
+  useEffect(() => {
+    setData(prev => prev.concat(newItem));
+  }, []); // No dependencies needed
+}
+```
+
+## Conclusion
+
+Advanced React Hooks patterns enable you to build more maintainable, reusable, and performant React applications. The key is understanding when to use each pattern and how to compose them effectively.
+
+Remember these principles:
+- Start simple and add complexity only when needed
+- Always consider the dependency array carefully
+- Test your custom hooks in isolation
+- Compose hooks to build more complex behavior
+- Use TypeScript for better developer experience
+
+By mastering these patterns, you&apos;ll be able to tackle complex state management scenarios and create hooks that truly solve real-world problems in your React applications.

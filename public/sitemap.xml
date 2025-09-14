@@ -1,38 +1,54 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
-    <loc>https://hamishw.com/</loc>
+    <loc>https://sayeed-portfolio.com/</loc>
     <changefreq>monthly</changefreq>
   </url>
   <url>
-    <loc>https://hamishw.com/contact/</loc>
+    <loc>https://sayeed-portfolio.com/contact/</loc>
     <changefreq>monthly</changefreq>
   </url>
   <url>
-    <loc>https://hamishw.com/articles/</loc>
+    <loc>https://sayeed-portfolio.com/articles/</loc>
     <changefreq>monthly</changefreq>
   </url>
   <url>
-    <loc>https://hamishw.com/uses/</loc>
+    <loc>https://sayeed-portfolio.com/uses/</loc>
     <changefreq>monthly</changefreq>
   </url>
   <url>
-    <loc>https://hamishw.com/projects/slice/</loc>
+    <loc>https://sayeed-portfolio.com/projects/slice/</loc>
     <changefreq>monthly</changefreq>
   </url>
   <url>
-    <loc>https://hamishw.com/projects/smart-sparrow/</loc>
+    <loc>https://sayeed-portfolio.com/projects/smart-sparrow/</loc>
     <changefreq>monthly</changefreq>
   </url>
   <url>
-    <loc>https://hamishw.com/projects/volkihar-knight/</loc>
+    <loc>https://sayeed-portfolio.com/projects/volkihar-knight/</loc>
     <changefreq>monthly</changefreq>
   </url>
   <url>
-    <loc>https://hamishw.com/articles/hello-world</loc>
+    <loc>https://sayeed-portfolio.com/articles/hello-world</loc>
     <changefreq>monthly</changefreq>
   </url>
   <url>
-    <loc>https://hamishw.com/articles/modern-styling-in-react</loc>
+    <loc>https://sayeed-portfolio.com/articles/modern-styling-in-react</loc>
+    <changefreq>monthly</changefreq>
+  </url>
+  <url>
+    <loc>https://sayeed-portfolio.com/articles/javascript-performance-optimization</loc>
+    <changefreq>monthly</changefreq>
+  </url>
+  <url>
+    <loc>https://sayeed-portfolio.com/articles/responsive-web-design-modern-css</loc>
+    <changefreq>monthly</changefreq>
+  </url>
+  <url>
+    <loc>https://sayeed-portfolio.com/articles/react-hooks-advanced-patterns</loc>
+    <changefreq>monthly</changefreq>
+  </url>
+  <url>
+    <loc>https://sayeed-portfolio.com/articles/fullstack-nodejs-express</loc>
     <changefreq>monthly</changefreq>
   </url>
 </urlset>

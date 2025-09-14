@@ -1,0 +1,946 @@
+---
+title: 'Full-Stack Development with Node.js and Express: A Complete Guide'
+abstract: Learn how to build robust, scalable backend applications with Node.js and Express. Covers authentication, database integration, API design, testing, and deployment best practices.
+date: '2024-03-20'
+banner: /static/nodejs-express-banner.jpg
+---
+
+## Introduction to Full-Stack Development
+
+Building full-stack applications requires a solid understanding of both frontend and backend technologies. In this comprehensive guide, I&apos;ll walk you through creating a complete backend API using Node.js and Express, covering everything from basic setup to production deployment.
+
+Node.js has become the go-to choice for JavaScript developers wanting to build server-side applications, and Express provides a minimal yet powerful framework for building web applications and APIs.
+
+## Setting Up the Development Environment
+
+### Project Initialization
+
+```bash
+# Create new project
+mkdir my-api
+cd my-api
+npm init -y
+
+# Install core dependencies
+npm install express mongoose dotenv cors helmet morgan
+npm install -D nodemon jest supertest eslint prettier
+
+# Install authentication dependencies
+npm install jsonwebtoken bcryptjs passport passport-jwt
+
+# Install validation and utilities
+npm install joi express-rate-limit compression
+```
+
+### Project Structure
+
+```
+my-api/
+├── src/
+│   ├── controllers/
+│   ├── middleware/
+│   ├── models/
+│   ├── routes/
+│   ├── services/
+│   ├── utils/
+│   └── app.js
+├── tests/
+├── config/
+├── .env
+├── .gitignore
+└── server.js
+```
+
+## Building the Express Application
+
+### Basic Server Setup
+
+```javascript
+// server.js
+const app = require('./src/app');
+const connectDB = require('./config/database');
+
+const PORT = process.env.PORT || 3000;
+
+// Connect to database
+connectDB();
+
+// Start server
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+```
+
+```javascript
+// src/app.js
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
+
+const authRoutes = require('./routes/auth');
+const userRoutes = require('./routes/users');
+const postRoutes = require('./routes/posts');
+const errorHandler = require('./middleware/errorHandler');
+
+const app = express();
+
+// Security middleware
+app.use(helmet());
+app.use(cors({
+  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  credentials: true
+}));
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100 // limit each IP to 100 requests per windowMs
+});
+app.use(limiter);
+
+// General middleware
+app.use(compression());
+app.use(morgan('combined'));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+
+// Routes
+app.use('/api/auth', authRoutes);
+app.use('/api/users', userRoutes);
+app.use('/api/posts', postRoutes);
+
+// Health check
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'OK', timestamp: new Date().toISOString() });
+});
+
+// Error handling
+app.use(errorHandler);
+
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(404).json({ message: 'Route not found' });
+});
+
+module.exports = app;
+```
+
+## Database Integration with MongoDB
+
+### Database Configuration
+
+```javascript
+// config/database.js
+const mongoose = require('mongoose');
+
+const connectDB = async () => {
+  try {
+    const conn = await mongoose.connect(process.env.MONGODB_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
+
+    console.log(`MongoDB Connected: ${conn.connection.host}`);
+  } catch (error) {
+    console.error('Database connection error:', error.message);
+    process.exit(1);
+  }
+};
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  await mongoose.connection.close();
+  console.log('Database connection closed.');
+  process.exit(0);
+});
+
+module.exports = connectDB;
+```
+
+### Mongoose Models
+
+```javascript
+// src/models/User.js
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+
+const userSchema = new mongoose.Schema({
+  username: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true,
+    minlength: 3,
+    maxlength: 30
+  },
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    lowercase: true,
+    match: [/^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/, 'Invalid email']
+  },
+  password: {
+    type: String,
+    required: true,
+    minlength: 6
+  },
+  profile: {
+    firstName: String,
+    lastName: String,
+    avatar: String,
+    bio: String
+  },
+  role: {
+    type: String,
+    enum: ['user', 'admin'],
+    default: 'user'
+  },
+  isActive: {
+    type: Boolean,
+    default: true
+  },
+  lastLogin: Date,
+  refreshToken: String
+}, {
+  timestamps: true,
+  toJSON: { virtuals: true },
+  toObject: { virtuals: true }
+});
+
+// Virtual for full name
+userSchema.virtual('profile.fullName').get(function() {
+  return `${this.profile.firstName} ${this.profile.lastName}`.trim();
+});
+
+// Pre-save middleware to hash password
+userSchema.pre('save', async function(next) {
+  if (!this.isModified('password')) return next();
+  
+  try {
+    const salt = await bcrypt.genSalt(12);
+    this.password = await bcrypt.hash(this.password, salt);
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Method to compare password
+userSchema.methods.comparePassword = async function(candidatePassword) {
+  return bcrypt.compare(candidatePassword, this.password);
+};
+
+// Method to generate auth token
+userSchema.methods.generateAuthToken = function() {
+  const jwt = require('jsonwebtoken');
+  return jwt.sign(
+    { id: this._id, role: this.role },
+    process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_EXPIRE || '7d' }
+  );
+};
+
+// Static method to find by credentials
+userSchema.statics.findByCredentials = async function(email, password) {
+  const user = await this.findOne({ email, isActive: true });
+  if (!user) {
+    throw new Error('Invalid credentials');
+  }
+
+  const isMatch = await user.comparePassword(password);
+  if (!isMatch) {
+    throw new Error('Invalid credentials');
+  }
+
+  return user;
+};
+
+module.exports = mongoose.model('User', userSchema);
+```
+
+```javascript
+// src/models/Post.js
+const mongoose = require('mongoose');
+
+const postSchema = new mongoose.Schema({
+  title: {
+    type: String,
+    required: true,
+    trim: true,
+    maxlength: 200
+  },
+  content: {
+    type: String,
+    required: true
+  },
+  author: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true
+  },
+  tags: [{
+    type: String,
+    lowercase: true,
+    trim: true
+  }],
+  category: {
+    type: String,
+    required: true,
+    enum: ['technology', 'lifestyle', 'business', 'education']
+  },
+  featured: {
+    type: Boolean,
+    default: false
+  },
+  published: {
+    type: Boolean,
+    default: false
+  },
+  publishedAt: Date,
+  views: {
+    type: Number,
+    default: 0
+  },
+  likes: [{
+    user: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User'
+    }
+  }],
+  comments: [{
+    user: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      required: true
+    },
+    content: {
+      type: String,
+      required: true,
+      maxlength: 500
+    },
+    createdAt: {
+      type: Date,
+      default: Date.now
+    }
+  }]
+}, {
+  timestamps: true,
+  toJSON: { virtuals: true }
+});
+
+// Virtual for like count
+postSchema.virtual('likesCount').get(function() {
+  return this.likes.length;
+});
+
+// Virtual for comment count
+postSchema.virtual('commentsCount').get(function() {
+  return this.comments.length;
+});
+
+// Index for search
+postSchema.index({ title: 'text', content: 'text' });
+postSchema.index({ author: 1, createdAt: -1 });
+postSchema.index({ category: 1, published: 1 });
+
+module.exports = mongoose.model('Post', postSchema);
+```
+
+## Authentication and Authorization
+
+### JWT Authentication Middleware
+
+```javascript
+// src/middleware/auth.js
+const jwt = require('jsonwebtoken');
+const User = require('../models/User');
+
+const auth = async (req, res, next) => {
+  try {
+    const token = req.header('Authorization')?.replace('Bearer ', '');
+    
+    if (!token) {
+      return res.status(401).json({ message: 'Access denied. No token provided.' });
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.id).select('-password -refreshToken');
+    
+    if (!user || !user.isActive) {
+      return res.status(401).json({ message: 'Invalid token.' });
+    }
+
+    req.user = user;
+    next();
+  } catch (error) {
+    res.status(401).json({ message: 'Invalid token.' });
+  }
+};
+
+const authorize = (...roles) => {
+  return (req, res, next) => {
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ 
+        message: 'Access denied. Insufficient permissions.' 
+      });
+    }
+    next();
+  };
+};
+
+module.exports = { auth, authorize };
+```
+
+### Authentication Controller
+
+```javascript
+// src/controllers/authController.js
+const User = require('../models/User');
+const jwt = require('jsonwebtoken');
+const { validationResult } = require('express-validator');
+
+const generateTokens = (userId) => {
+  const accessToken = jwt.sign(
+    { id: userId },
+    process.env.JWT_SECRET,
+    { expiresIn: '15m' }
+  );
+  
+  const refreshToken = jwt.sign(
+    { id: userId },
+    process.env.JWT_REFRESH_SECRET,
+    { expiresIn: '7d' }
+  );
+  
+  return { accessToken, refreshToken };
+};
+
+exports.register = async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { username, email, password, profile } = req.body;
+
+    // Check if user exists
+    const existingUser = await User.findOne({
+      $or: [{ email }, { username }]
+    });
+
+    if (existingUser) {
+      return res.status(400).json({
+        message: 'User with this email or username already exists'
+      });
+    }
+
+    // Create user
+    const user = new User({
+      username,
+      email,
+      password,
+      profile
+    });
+
+    await user.save();
+
+    // Generate tokens
+    const { accessToken, refreshToken } = generateTokens(user._id);
+    
+    // Save refresh token
+    user.refreshToken = refreshToken;
+    await user.save();
+
+    res.status(201).json({
+      message: 'User registered successfully',
+      user: {
+        id: user._id,
+        username: user.username,
+        email: user.email,
+        profile: user.profile,
+        role: user.role
+      },
+      accessToken,
+      refreshToken
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+exports.login = async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { email, password } = req.body;
+
+    // Find user and verify password
+    const user = await User.findByCredentials(email, password);
+
+    // Update last login
+    user.lastLogin = new Date();
+    
+    // Generate tokens
+    const { accessToken, refreshToken } = generateTokens(user._id);
+    user.refreshToken = refreshToken;
+    
+    await user.save();
+
+    res.json({
+      message: 'Login successful',
+      user: {
+        id: user._id,
+        username: user.username,
+        email: user.email,
+        profile: user.profile,
+        role: user.role
+      },
+      accessToken,
+      refreshToken
+    });
+  } catch (error) {
+    if (error.message === 'Invalid credentials') {
+      return res.status(401).json({ message: error.message });
+    }
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+};
+
+exports.refreshToken = async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+
+    if (!refreshToken) {
+      return res.status(401).json({ message: 'Refresh token required' });
+    }
+
+    const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+    const user = await User.findById(decoded.id);
+
+    if (!user || user.refreshToken !== refreshToken) {
+      return res.status(401).json({ message: 'Invalid refresh token' });
+    }
+
+    // Generate new tokens
+    const tokens = generateTokens(user._id);
+    user.refreshToken = tokens.refreshToken;
+    await user.save();
+
+    res.json(tokens);
+  } catch (error) {
+    res.status(401).json({ message: 'Invalid refresh token' });
+  }
+};
+
+exports.logout = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    user.refreshToken = null;
+    await user.save();
+
+    res.json({ message: 'Logout successful' });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+```
+
+## API Routes and Controllers
+
+### RESTful API Design
+
+```javascript
+// src/routes/posts.js
+const express = require('express');
+const { body } = require('express-validator');
+const { auth, authorize } = require('../middleware/auth');
+const postController = require('../controllers/postController');
+const cache = require('../middleware/cache');
+
+const router = express.Router();
+
+// Validation middleware
+const validatePost = [
+  body('title').trim().isLength({ min: 1, max: 200 }).withMessage('Title is required'),
+  body('content').trim().isLength({ min: 1 }).withMessage('Content is required'),
+  body('category').isIn(['technology', 'lifestyle', 'business', 'education'])
+];
+
+// Public routes
+router.get('/', cache(300), postController.getAllPosts);
+router.get('/:id', cache(300), postController.getPostById);
+
+// Protected routes
+router.use(auth); // All routes below require authentication
+
+router.post('/', validatePost, postController.createPost);
+router.put('/:id', validatePost, postController.updatePost);
+router.delete('/:id', postController.deletePost);
+
+router.post('/:id/like', postController.likePost);
+router.delete('/:id/like', postController.unlikePost);
+
+router.post('/:id/comments', [
+  body('content').trim().isLength({ min: 1, max: 500 })
+], postController.addComment);
+
+router.delete('/:id/comments/:commentId', postController.deleteComment);
+
+// Admin only routes
+router.patch('/:id/feature', authorize('admin'), postController.toggleFeatured);
+
+module.exports = router;
+```
+
+### Advanced Controller with Service Layer
+
+```javascript
+// src/services/postService.js
+const Post = require('../models/Post');
+
+class PostService {
+  async getAllPosts(filters = {}, options = {}) {
+    const {
+      page = 1,
+      limit = 10,
+      sortBy = 'createdAt',
+      sortOrder = 'desc',
+      category,
+      author,
+      featured,
+      published = true
+    } = options;
+
+    const query = { published };
+    
+    if (category) query.category = category;
+    if (author) query.author = author;
+    if (featured !== undefined) query.featured = featured;
+
+    const skip = (page - 1) * limit;
+    const sort = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
+
+    const [posts, total] = await Promise.all([
+      Post.find(query)
+        .populate('author', 'username profile.firstName profile.lastName profile.avatar')
+        .sort(sort)
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Post.countDocuments(query)
+    ]);
+
+    return {
+      posts,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    };
+  }
+
+  async getPostById(id, incrementViews = true) {
+    const post = await Post.findById(id)
+      .populate('author', 'username profile')
+      .populate('comments.user', 'username profile.firstName profile.lastName');
+
+    if (!post) {
+      throw new Error('Post not found');
+    }
+
+    if (incrementViews) {
+      post.views += 1;
+      await post.save();
+    }
+
+    return post;
+  }
+
+  async createPost(postData, authorId) {
+    const post = new Post({
+      ...postData,
+      author: authorId
+    });
+
+    await post.save();
+    await post.populate('author', 'username profile');
+    
+    return post;
+  }
+
+  async updatePost(id, updateData, userId) {
+    const post = await Post.findOne({ _id: id, author: userId });
+    
+    if (!post) {
+      throw new Error('Post not found or unauthorized');
+    }
+
+    Object.assign(post, updateData);
+    await post.save();
+    
+    return post;
+  }
+
+  async deletePost(id, userId, userRole) {
+    const query = userRole === 'admin' ? { _id: id } : { _id: id, author: userId };
+    const post = await Post.findOneAndDelete(query);
+    
+    if (!post) {
+      throw new Error('Post not found or unauthorized');
+    }
+    
+    return post;
+  }
+
+  async likePost(postId, userId) {
+    const post = await Post.findById(postId);
+    
+    if (!post) {
+      throw new Error('Post not found');
+    }
+
+    const alreadyLiked = post.likes.some(like => like.user.toString() === userId);
+    
+    if (alreadyLiked) {
+      throw new Error('Post already liked');
+    }
+
+    post.likes.push({ user: userId });
+    await post.save();
+    
+    return post;
+  }
+}
+
+module.exports = new PostService();
+```
+
+```javascript
+// src/controllers/postController.js
+const PostService = require('../services/postService');
+const { validationResult } = require('express-validator');
+
+exports.getAllPosts = async (req, res) => {
+  try {
+    const options = {
+      page: parseInt(req.query.page) || 1,
+      limit: parseInt(req.query.limit) || 10,
+      sortBy: req.query.sortBy || 'createdAt',
+      sortOrder: req.query.sortOrder || 'desc',
+      category: req.query.category,
+      featured: req.query.featured,
+      author: req.query.author
+    };
+
+    const result = await PostService.getAllPosts({}, options);
+    
+    res.json({
+      success: true,
+      data: result.posts,
+      pagination: result.pagination
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching posts',
+      error: error.message
+    });
+  }
+};
+
+exports.getPostById = async (req, res) => {
+  try {
+    const post = await PostService.getPostById(req.params.id);
+    
+    res.json({
+      success: true,
+      data: post
+    });
+  } catch (error) {
+    if (error.message === 'Post not found') {
+      return res.status(404).json({
+        success: false,
+        message: error.message
+      });
+    }
+    
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching post',
+      error: error.message
+    });
+  }
+};
+
+exports.createPost = async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        errors: errors.array()
+      });
+    }
+
+    const post = await PostService.createPost(req.body, req.user.id);
+    
+    res.status(201).json({
+      success: true,
+      message: 'Post created successfully',
+      data: post
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Error creating post',
+      error: error.message
+    });
+  }
+};
+```
+
+## Error Handling and Logging
+
+```javascript
+// src/middleware/errorHandler.js
+const logger = require('../utils/logger');
+
+const errorHandler = (err, req, res, next) => {
+  let error = { ...err };
+  error.message = err.message;
+
+  // Log error
+  logger.error(err);
+
+  // Mongoose bad ObjectId
+  if (err.name === 'CastError') {
+    const message = 'Resource not found';
+    error = { message, statusCode: 404 };
+  }
+
+  // Mongoose duplicate key
+  if (err.code === 11000) {
+    const message = 'Duplicate field value entered';
+    error = { message, statusCode: 400 };
+  }
+
+  // Mongoose validation error
+  if (err.name === 'ValidationError') {
+    const message = Object.values(err.errors).map(val => val.message);
+    error = { message, statusCode: 400 };
+  }
+
+  res.status(error.statusCode || 500).json({
+    success: false,
+    message: error.message || 'Server Error'
+  });
+};
+
+module.exports = errorHandler;
+```
+
+## Testing
+
+```javascript
+// tests/auth.test.js
+const request = require('supertest');
+const app = require('../src/app');
+const User = require('../src/models/User');
+
+describe('Authentication', () => {
+  beforeEach(async () => {
+    await User.deleteMany({});
+  });
+
+  describe('POST /api/auth/register', () => {
+    it('should register a new user', async () => {
+      const userData = {
+        username: 'testuser',
+        email: 'test@example.com',
+        password: 'password123',
+        profile: {
+          firstName: 'Test',
+          lastName: 'User'
+        }
+      };
+
+      const response = await request(app)
+        .post('/api/auth/register')
+        .send(userData)
+        .expect(201);
+
+      expect(response.body.user.email).toBe(userData.email);
+      expect(response.body.accessToken).toBeDefined();
+    });
+
+    it('should not register user with invalid email', async () => {
+      const userData = {
+        username: 'testuser',
+        email: 'invalid-email',
+        password: 'password123'
+      };
+
+      await request(app)
+        .post('/api/auth/register')
+        .send(userData)
+        .expect(400);
+    });
+  });
+
+  describe('POST /api/auth/login', () => {
+    beforeEach(async () => {
+      const user = new User({
+        username: 'testuser',
+        email: 'test@example.com',
+        password: 'password123'
+      });
+      await user.save();
+    });
+
+    it('should login with valid credentials', async () => {
+      const response = await request(app)
+        .post('/api/auth/login')
+        .send({
+          email: 'test@example.com',
+          password: 'password123'
+        })
+        .expect(200);
+
+      expect(response.body.accessToken).toBeDefined();
+    });
+
+    it('should not login with invalid credentials', async () => {
+      await request(app)
+        .post('/api/auth/login')
+        .send({
+          email: 'test@example.com',
+          password: 'wrongpassword'
+        })
+        .expect(401);
+    });
+  });
+});
+```
+
+## Conclusion
+
+This comprehensive guide covers the essential aspects of building a robust Node.js and Express backend application. Key takeaways include:
+
+- **Structure**: Organize your code with clear separation of concerns
+- **Security**: Implement proper authentication, authorization, and security middleware
+- **Database**: Use Mongoose for MongoDB integration with proper validation and relationships
+- **API Design**: Follow RESTful principles and implement proper error handling
+- **Testing**: Write comprehensive tests for your API endpoints
+- **Performance**: Implement caching, rate limiting, and optimization techniques
+
+Building full-stack applications requires attention to detail in both architecture and implementation. By following these patterns and best practices, you&apos;ll create maintainable, scalable, and secure backend services that can power modern web applications.
